@@ -1,274 +1,620 @@
 # POS — Real-Time Inventory Point of Sale
 
-A web-based point-of-sale system for a grocery store / mart, built around **real-time inventory**: scanning a barcode deducts stock the moment the item is added to the cart, receiving stock adds it through purchase orders, and every change is written to an append-only ledger and History.
+A web-based Point-of-Sale (POS) and inventory management system for a grocery store / mart.
 
-Runs on **localhost**. Backend: Python / FastAPI / PostgreSQL. Frontend: React / TypeScript / Vite.
+The system is designed around one central idea: **sales, stock, purchasing, refunds, expenses, user actions, and reporting all stay connected to the same live inventory and audit trail.**
 
-\---
+It runs locally and uses a **React + TypeScript** frontend, a **Python + FastAPI** backend, and **PostgreSQL** for persistent data.
+
+---
+
+## Product Overview
+
+This POS is more than a checkout screen. It covers the main operational flow of a small retail store:
+
+**Sell → Inventory changes → Purchase/receive stock → Track every movement → Manage invoices/refunds → Record expenses → Review reports → Audit user activity**
+
+The application keeps these areas connected so that a stock change made in one part of the system is reflected in the relevant inventory, movement history, invoices, and reporting views.
+
+---
+
+## Main Capabilities
+
+### 🛒 Point of Sale / Selling
+
+The selling screen is the main operational workspace.
+
+- Products can be found by **barcode/SKU** or by searching their name.
+- Products can be sold as whole units or as **weighed quantities** such as kg/litre, with up to 3 decimal places.
+- Inventory is deducted **when an item is added to the cart**, rather than waiting until the final checkout.
+- Removing an item or clearing the cart returns the reserved stock.
+- The cart supports item quantities, live pricing and totals.
+- Checkout supports:
+  - Cash
+  - Card
+  - Wallet
+- Tax is applied to the sale and discount codes can be used where permitted.
+- The receipt records the person who served the customer.
+- Refunds can be performed per item or partially, with the corresponding stock restored.
+
+This makes the POS screen directly connected to inventory rather than treating sales and stock as separate systems.
+
+### 📦 Real-Time Inventory
+
+Inventory is handled through a central stock-change flow.
+
+Every stock change records:
+
+- What changed
+- Previous quantity
+- New quantity
+- Reason/type of movement
+- User responsible
+- Related business action
+
+Examples of stock movements include:
+
+- Sale / scan
+- Cart removal / void
+- Purchase receiving
+- Manual stock adjustment
+- Refund
+
+The application prevents stock from becoming negative through application-level checks as well as a database constraint.
+
+The frontend also receives live updates through **Server-Sent Events (SSE)** so open screens can reflect inventory changes without manually refreshing.
+
+### 🏷️ Product Catalog
+
+The Catalog section manages the products available to the POS.
+
+It supports:
+
+- Adding products
+- Editing product information
+- Product price and cost
+- Live margin calculation
+- Below-cost warnings
+- Product activation/deactivation
+- Immutable barcode/SKU
+- Product price history
+
+Price changes are treated as controlled actions and can require manager/owner approval depending on the user's role.
+
+### 🚚 Purchasing & Stock Receiving
+
+The purchasing workflow connects supplier purchasing directly to inventory.
+
+It covers:
+
+- Suppliers
+- Purchase orders
+- Creating purchase orders
+- Cancelling/closing purchase orders
+- Receiving stock, including partial receiving
+- Barcode-based receiving
+- Recording purchases as paid/unpaid
+- Supplier balances
+- Purchase reporting
+
+When stock is received, inventory is increased through the same controlled stock movement system used by the POS.
+
+This keeps the relationship between **what was purchased, what was received, and what is currently in stock** traceable.
+
+### 🧾 Invoices & Refunds
+
+Sales are retained as invoices that can be reviewed after checkout.
+
+The invoice workflow supports:
+
+- Viewing completed sales
+- Reviewing line items
+- Tracking quantities and totals
+- Partial refunds
+- Per-item refunds
+- Restoring refunded quantities to inventory
+
+Refunds are also reflected in the audit/history trail so the original sale and subsequent adjustment remain traceable.
+
+### 💰 Expenses & Reports
+
+Managers can record operating expenses and review business activity through the reporting area.
+
+The reports cover information such as:
+
+- Net sales
+- Refunds
+- Purchases
+- Expenses
+- Cash flow
+- Unpaid supplier amounts
+- Top-selling products
+
+Expenses are not silently deleted. A voided expense remains part of the operational history together with the reason for the void.
+
+### 🕵️ History / Audit Log
+
+The History section provides an audit trail of business activity.
+
+Business events are recorded in the same transaction as the underlying change, so the system can connect an action with the data change it caused.
+
+History can be filtered by:
+
+- Event type
+- Text
+- Date
+
+The audit information identifies the person who performed the action and, where approval was required, the approving user as well.
+
+The history and stock ledgers are designed to be **append-only**, which helps preserve an operational record rather than allowing business events to simply disappear.
+
+---
+
+## User Roles & Access Control
+
+The system has three application roles:
+
+| Role | Access |
+|---|---|
+| **Cashier** | Selling, products/stock visibility, invoices, stock movements and own account |
+| **Manager** | Cashier capabilities plus Catalog, Purchasing, Suppliers, Expenses, Reports and History |
+| **Owner** | Manager capabilities plus user management and Security |
+
+The interface hides sections a role cannot use, while the backend enforces the same permissions.
+
+This means access control is not dependent only on what is visible in the frontend.
+
+### Manager Approval
+
+Sensitive actions can require a manager or owner to approve the action directly from the cashier's screen.
+
+Approval can be required for actions such as:
+
+- Refunds
+- Stock adjustments
+- Discount codes
+- Product price/cost changes
+- Receiving stock
+- Purchase-order cancellation/closing
+- Marking purchases as paid
+- Voiding expenses
+- User-management operations
+
+The approval is recorded in History so both the acting user and approving user remain identifiable.
+
+---
+
+## Authentication & Security
+
+The application provides individual user accounts instead of a shared POS login.
+
+Security functionality includes:
+
+- Username/password authentication
+- Personal PINs
+- Role-based permissions
+- Sensitive-action approval
+- Account lockouts
+- PIN lockouts
+- Session expiration
+- Owner-controlled user management
+- Account unlocking
+- Password/PIN reset support
+- Central permission policy for API routes
+
+The permission policy is centralized in the backend. The application checks that every route has a permission rule and refuses to start if the policy is incomplete.
+
+PINs are not stored as plain text. They use a salted `scrypt` derivation with a secret key.
+
+---
+
+## How the System Works
+
+The application follows a clear separation between the UI, API/business logic and database.
+
+```mermaid
+flowchart LR
+    A[React / TypeScript POS] -->|HTTP API| B[FastAPI Backend]
+    A <-->|Server-Sent Events| B
+    B --> C[Authentication & Permissions]
+    B --> D[POS / Catalog / Purchasing]
+    B --> E[History & Stock Ledger]
+    B --> F[PostgreSQL]
+    D --> F
+    E --> F
+```
+
+### Typical Sale Flow
+
+```text
+Product scan/search
+        ↓
+Product + quantity added to cart
+        ↓
+Available stock checked
+        ↓
+Stock reserved/deducted
+        ↓
+Cart can be changed
+        ↓
+Removed items return to stock
+        ↓
+Checkout
+        ↓
+Invoice created
+        ↓
+History/audit event recorded
+        ↓
+Reports and invoice data updated
+```
+
+### Typical Purchase Flow
+
+```text
+Supplier
+   ↓
+Purchase Order
+   ↓
+Order items
+   ↓
+Partial/full receiving
+   ↓
+Stock increases
+   ↓
+Stock movement recorded
+   ↓
+Purchase recorded as paid/unpaid
+   ↓
+Purchasing reports updated
+```
+
+### Refund Flow
+
+```text
+Existing Invoice
+      ↓
+Select item/quantity to refund
+      ↓
+Approval when required
+      ↓
+Refund recorded
+      ↓
+Inventory restored
+      ↓
+History updated
+```
+
+---
+
+## Live Inventory & Audit Model
+
+One of the important design choices is that stock changes are not scattered across unrelated parts of the application.
+
+The system uses a central stock movement model so actions such as selling, receiving, adjusting and refunding can be traced consistently.
+
+Conceptually:
+
+```text
+Business Action
+      ↓
+Stock Change
+      ↓
+Before / After Quantity
+      ↓
+Movement Ledger
+      ↓
+History / Audit Event
+```
+
+This gives the system a traceable relationship between an operational action and the inventory change it produced.
+
+---
+
+## Database
+
+PostgreSQL is used as the primary database.
+
+The database stores the application's operational data, including:
+
+- Users and roles
+- Products
+- Inventory
+- Sales/invoices
+- Cart state
+- Stock movements
+- Purchase orders
+- Suppliers
+- Purchases
+- Expenses
+- History/audit events
+- Product price history
+
+The backend uses transactions for business operations so related changes can be committed together.
+
+A restricted application database login can also be configured so the POS application itself cannot modify or delete protected history/ledger data.
+
+---
 
 ## Screenshots
 
-|||
-|-|-|
-|**Dashboard (sell screen)** !\[Dashboard](docs/screenshots/01-dashboard.png)|**Weighed item (kg / l)** !\[Weighed item](docs/screenshots/02-weighed-item.png)|
-|**Inventory + live stock movements** !\[Inventory](docs/screenshots/03-inventory.png)|**Catalog** !\[Catalog](docs/screenshots/04-catalog.png)|
-|**Purchasing: orders and receiving** !\[Purchasing](docs/screenshots/05-purchasing.png)|**Invoices and partial refund** !\[Invoices](docs/screenshots/06-invoices-refund.png)|
-|**Reports and expenses** !\[Reports](docs/screenshots/07-reports.png)|**History (who did what)** !\[History](docs/screenshots/08-history.png)|
-|**Login** !\[Login](docs/screenshots/09-login.png)|**Manager approval (username + PIN)** !\[Approval](docs/screenshots/10-pin-approval.png)|
-|**Security: people and roles** !\[Security](docs/screenshots/11-security.png)|**Account: own password and PIN** !\[Account](docs/screenshots/12-account.png)|
+The following screenshots show the current application flow and major areas of the POS.
 
-\---
+### Point of Sale
 
-## Features
+| Dashboard | Cart / Sale |
+|---|---|
+| ![Dashboard](docs/screenshots/01-dashboard-empty.png) | ![Dashboard cart](docs/screenshots/02-dashboard-cart.png) |
 
-**Selling**
+| Payment / Cart | Weighted Item |
+|---|---|
+| ![Payment](docs/screenshots/03-dashboard-cart-payment.png) | ![Weighted item](docs/screenshots/05-dashboard-weighted-item.png) |
 
-* Deduct-on-scan: stock drops as soon as an item is scanned; removing it from the cart or clearing the cart returns it.
-* Scan by barcode (SKU) or search by name; pieces (whole numbers) and weighed items (kg / l, up to 3 decimals).
-* Cash / Card / Wallet, tax 8%, discount codes, itemised receipt showing who served the customer.
-* Per-item and partial refunds; stock is restored exactly and refunds always add up to the invoice total.
+| Search / Item Selection | Checkout |
+|---|---|
+| ![Item search](docs/screenshots/06-dashboard-item-search.png) | ![Checkout](docs/screenshots/07-checkout.png) |
 
-**Inventory**
+### Inventory
 
-* Single choke point for every stock change; stock can never go negative (checked in the app and by a database constraint).
-* Live stock-movement ledger (scan, void, receive, adjust, refund) with before/after values and the person responsible.
-* Live updates on every open screen (Server-Sent Events).
+| Inventory | Low Stock |
+|---|---|
+| ![Inventory](docs/screenshots/04-inventory.png) | ![Low stock](docs/screenshots/09-inventory-low-stock.png) |
 
-**Catalog**
+| Stock Warning | Stock Movements |
+|---|---|
+| ![Low stock warning](docs/screenshots/08-low-stock-warning.png) | ![Stock movements](docs/screenshots/10-stock-movements.png) |
 
-* Add and edit products, price/cost with live margin, below-cost warnings, deactivate/reactivate, per-product price history. Barcode is immutable and price must be above zero.
+### Catalog
 
-**Purchasing**
+| Catalog | Product Editing |
+|---|---|
+| ![Catalog](docs/screenshots/11-catalog.png) | ![Catalog edit](docs/screenshots/12-catalog-edit.png) |
 
-* Suppliers, purchase orders, partial receiving by barcode, purchases (paid/unpaid), expenses (voided with a reason, never deleted), and reports (net sales, refunds, purchases, expenses, cash-flow, unpaid to suppliers, top products).
+| Product Form | Updated Catalog |
+|---|---|
+| ![Product form](docs/screenshots/13-catalog-product-form.png) | ![Catalog update](docs/screenshots/14-catalog-update.png) |
 
-**History (audit log)**
+### Purchasing
 
-* Every business event is written in the same transaction as the change, append-only, filterable by type, text and date, and shows the person and the approver.
+| Purchase Orders | Create Purchase Order |
+|---|---|
+| ![Purchasing](docs/screenshots/15-purchasing-orders.png) | ![Create purchase order](docs/screenshots/16-purchase-order-create.png) |
 
-**Security**
+| Purchase Order List | Receiving |
+|---|---|
+| ![Purchase orders](docs/screenshots/17-purchase-orders-list.png) | ![Receiving](docs/screenshots/18-purchase-receiving.png) |
 
-* Personal logins, three roles (cashier, manager, owner), PIN for sensitive actions, manager approval on a cashier's screen, lockouts, a central permission table that stops the app from starting if any route has no rule, and an optional restricted database login that cannot edit history.
+### Approval, Invoices & Reporting
 
-**Operations**
+| Manager Approval | Purchasing History |
+|---|---|
+| ![Manager PIN approval](docs/screenshots/19-manager-pin-approval.png) | ![Purchasing history](docs/screenshots/20-purchasing-history.png) |
 
-* Daily automatic backups, one-time SQLite to PostgreSQL migration tool, recovery tool for forgotten passwords/PINs, self-installing launcher.
+| Invoices | Invoice / Refund |
+|---|---|
+| ![Invoices](docs/screenshots/21-invoices.png) | ![Invoice refund](docs/screenshots/22-invoice-refund.png) |
 
-\---
+| Expenses & Reports | Reports |
+|---|---|
+| ![Expenses and reports](docs/screenshots/23-expenses-reports.png) | ![Reports](docs/screenshots/24-reports.png) |
 
-## Quick start (Windows)
+### Audit & Security
 
-### 1\. PostgreSQL (one time)
+| History | Security |
+|---|---|
+| ![History](docs/screenshots/25-history-audit-log.png) | ![Security](docs/screenshots/26-security.png) |
 
-Install PostgreSQL, then in PowerShell (replace `18` with your installed version):
+---
 
-```powershell
-\\\& "C:\\\\Program Files\\\\PostgreSQL\\\\18\\\\bin\\\\psql.exe" -U postgres -c "CREATE USER pos WITH PASSWORD 'pos';"
+## Technology Stack
+
+### Frontend
+
+- React
+- TypeScript
+- Vite
+- CSS
+- Server communication through the backend API
+- Server-Sent Events for live updates
+
+### Backend
+
+- Python
+- FastAPI
+- PostgreSQL database integration
+- Transaction-based business operations
+- Authentication and authorization
+- Audit/history recording
+
+### Testing
+
+The project includes backend test suites covering:
+
+- POS/business flows
+- Selling
+- Refunds
+- Purchasing
+- History
+- Concurrency
+- Authentication
+- Roles and permissions
+- PIN approval
+- Lockouts
+- Sessions
+- CORS
+- Restricted database access
+
+There is also a simulated-browser UI click-through covering the main user interface flows.
+
+---
+
+## Local Setup
+
+The application is intended to run locally.
+
+### Requirements
+
+- Python
+- Node.js / npm
+- PostgreSQL
+
+Docker can also be used for the PostgreSQL database.
+
+### Database
+
+Create the PostgreSQL database and application user, then configure the backend environment using:
+
+```text
+backend/.env.example
 ```
 
-```powershell
-\\\& "C:\\\\Program Files\\\\PostgreSQL\\\\18\\\\bin\\\\psql.exe" -U postgres -c "CREATE DATABASE pos OWNER pos;"
+The main application database URL is configured through:
+
+```text
+DATABASE_URL
 ```
 
-The password prompt shows nothing while you type. Type it and press Enter.
-Docker alternative: `docker compose up -d db`.
+The default shop timezone is:
 
-**Before the real store opens, replace the default password `pos`** (and set it in `backend/.env`).
-
-### 2\. Run
-
-Double-click **`start.bat`**. It checks Python and Node.js, installs missing backend and frontend packages, makes sure PostgreSQL is answering, starts the backend and the frontend in two windows, and opens http://localhost:5173. If anything is wrong it explains what to do in plain words.
-
-Mac / Linux: `./start.sh`.
-
-Manual start, in two terminals:
-
-```
-cd backend
-python -m uvicorn main:app --reload --port 8000 --timeout-graceful-shutdown 2
+```text
+Asia/Karachi
 ```
 
-```
-cd frontend
-npm install
-npm run dev
-```
+### First Run
 
-Run the backend as **one process** (no `--workers`): the live-update counter lives in that process. A fresh database creates all tables and 10 sample products automatically.
+On the first launch, the application provides a first-time setup flow to create the initial owner account.
 
-### 3\. First-time setup
+After that, the owner can create the required manager and cashier accounts through the Security section.
 
-The first time you open the app you see **First-time setup**. Create the **owner** (username, full name, password, 4 to 8 digit PIN). This is only possible while there are no users, and only from the POS computer itself. Then open **Security → Add a person** for each manager and cashier.
+---
 
-When adding a person or resetting a password, the box *"They must choose their own password"* is ticked by default (the password you type is only a starting password). Untick it and the password you type is their permanent password.
+## Backups & Data Migration
 
-\---
+The project includes database backup and migration functionality.
 
-## Roles
+### Backups
 
-|Role|Can do|
-|-|-|
-|**Cashier**|Sell (scan, cart, checkout), see products and stock, invoices, stock movements, own account|
-|**Manager**|Everything a cashier can, plus Catalog, Purchasing, suppliers, expenses, Reports, History|
-|**Owner**|Everything a manager can, plus the Security page: add and disable people, change roles, reset passwords and PINs, unlock accounts|
+The backup system supports:
 
-Tabs a role cannot use are hidden, and the server enforces the same rules. Nobody can change their own role or deactivate themselves, and the last active owner can never be removed.
+- PostgreSQL dumps
+- Verification after backup creation
+- Retention of recent backups
+- Scheduled daily backups
+- Restore from a database dump
 
-## PIN and approval
+The application secret used for PIN protection is kept separately from the database backup and should be backed up separately as well.
 
-A PIN is asked at the moment of: refund, stock adjustment, a discount code, changing a product's price or cost, receiving stock, cancelling or closing a purchase order, marking a purchase paid, voiding an expense, and every user-management action.
+### SQLite → PostgreSQL Migration
 
-A **cashier** cannot refund, adjust stock or apply a discount alone. A **manager or owner types their username and PIN** on the cashier's screen, and History records both people. Cancelling the PIN box changes nothing.
+An existing SQLite database can be migrated to PostgreSQL.
 
-* 5 wrong passwords lock the account for 10 minutes.
-* 5 wrong PINs lock that PIN for 5 minutes.
-* The owner can unlock either from the Security page.
-* Sessions last 12 hours.
+The migration process is designed to preserve IDs and historical information and then verify:
 
-PINs are stored as salted scrypt of an HMAC keyed with a secret in `backend/pos\\\_secret.key`. **Keep a copy of that file somewhere safe.** If it is lost, passwords still work but every PIN must be reset.
+- Row counts
+- Money totals
+- Stock ledger consistency
 
-**Forgot the owner password or PIN?** On the POS computer, in `backend\\\\`:
+A dry-run mode is available before applying the migration.
 
-```
-python manage\\\_users.py list
-python manage\\\_users.py reset-password USERNAME
-python manage\\\_users.py reset-pin USERNAME
-python manage\\\_users.py unlock USERNAME
-```
+---
 
-\---
+## API Structure
 
-## Lock the database down (recommended, once, for the real store)
+The backend exposes REST-style API routes grouped by business area.
 
-By default the app connects as the database owner `pos`, so anyone who learns that password can edit history. This step creates a restricted login `pos\\\_app` that can run the POS but **cannot** edit or delete History or the stock ledger, delete sales, products or people, change or drop tables, or switch the guards off.
+| Area | Examples |
+|---|---|
+| Authentication | `/auth/status`, `/auth/setup`, `/auth/login`, `/auth/logout` |
+| Users & Security | `/users`, `/users/{id}/update`, `/security/policy` |
+| Selling | `/inventory`, `/scan`, `/cart`, `/checkout`, `/sales`, `/movements` |
+| Catalog | `/catalog/meta`, `/catalog/products`, `/catalog/products/{id}/update` |
+| Purchasing | `/suppliers`, `/purchase-orders`, `/purchases`, `/expenses`, `/reports/purchases` |
+| History | `/history`, `/history/meta` |
 
-Stop the backend, then in `backend\\\\` (use the PostgreSQL administrator `postgres` password; percent-encode symbols, e.g. `@` = `%40`):
+All protected routes require authentication, and non-GET requests use the application's request protection header.
 
-```
-python secure\\\_db.py --admin-url postgresql://postgres:YOUR\\\_POSTGRES\\\_PASSWORD@localhost:5432/pos
-```
+---
 
-It proves the lock works by attempting 10 forbidden actions, then writes the new `DATABASE\\\_URL` into `backend\\\\.env`. Restart the backend. Keep the `postgres` and `pos` passwords **out of** `.env`. You need them only for:
+## Project Structure
 
-```
-python init\\\_db.py --admin-url postgresql://pos:PASSWORD@localhost:5432/pos
-```
-
-(after an update that changes tables), restoring backups, and migrations.
-
-\---
-
-## Bring existing data over (one time)
-
-To copy an old SQLite `pos.db` into PostgreSQL (the target database must be empty), run from `backend\\\\` with the backend **not** started:
-
-```
-python migrate\\\_sqlite\\\_to\\\_postgres.py --sqlite pos.db --dry-run
-```
-
-```
-python migrate\\\_sqlite\\\_to\\\_postgres.py --sqlite pos.db
-```
-
-It keeps every id and number, builds History from past activity, then verifies row counts, money totals and the stock ledger. If any check fails, nothing is saved. Keep `pos.db` as a backup.
-
-## Backups
-
-* `backup.bat` takes a backup now (`backups\\\\pos-DATE-TIME.dump`, newest 14 kept, each verified after writing).
-* Run `schedule-backup.bat` once to have Windows do it daily at 02:00 (log in `backups\\\\backup.log`).
-* Restore into an empty database: `pg\\\_restore --no-owner -d pos backups\\\\pos-20261002-020000.dump`
-* Backups do not contain `pos\\\_secret.key`. Copy it separately.
-* Copy the `backups` folder off the computer now and then. A backup on the same disk does not survive a dead disk.
-* `pg\\\_dump` must be on PATH (add PostgreSQL's `bin` folder), or Docker is used as a fallback.
-
-\---
-
-## Configuration
-
-Environment variables or `backend/.env` (see `backend/.env.example`):
-
-|Variable|Default|Purpose|
-|-|-|-|
-|`DATABASE\\\_URL`|`postgresql://pos:pos@localhost:5432/pos`|Database login used by the app|
-|`DATABASE\\\_ADMIN\\\_URL`|unset|Owner login used only for table work|
-|`POS\\\_APP\\\_ROLE`|`pos\\\_app`|Name of the restricted login|
-|`POS\\\_TZ`|`Asia/Karachi`|Shop time zone (decides what "today" means)|
-|`POS\\\_POOL\\\_MAX`|`20`|Database connection pool size|
-|`POS\\\_BACKUP\\\_KEEP`|`14`|Number of backups kept|
-|`POS\\\_SESSION\\\_HOURS`|`12`|Login lifetime|
-|`POS\\\_CORS\\\_ORIGIN\\\_REGEX`|this computer + private networks|Which screens may talk to the backend|
-|`POS\\\_SECRET\\\_KEY`|unset (file `pos\\\_secret.key` is used)|Secret mixed into PINs|
-|`POS\\\_ALLOW\\\_REMOTE\\\_SETUP`|unset|Allow first-owner creation from another computer (not recommended)|
-
-\---
-
-## Tests
-
-Use a throw-away database whose name ends in `\\\_test` (wiped on every run; the tests refuse any other name):
-
-```
-psql -U postgres -c "CREATE DATABASE pos\\\_test OWNER pos;"
-pip install httpx
-```
-
-Run one at a time, in `backend\\\\`:
-
-```
-python tests/test\\\_backend.py
-python tests/test\\\_security.py
-python tests/test\\\_hardened.py
-```
-
-`test\\\_backend.py` covers selling, refunds, purchasing, History and concurrency. `test\\\_security.py` covers login, roles, PINs, approval, lockouts, sessions and CORS. `test\\\_hardened.py` covers the restricted `pos\\\_app` login and needs `POS\\\_TEST\\\_ADMIN\\\_URL` (the `postgres` login for `pos\\\_test`).
-
-A simulated-browser click-through (25 checks) is in `tests-ui/`; see its README.
-
-\---
-
-## Project structure
-
-```
+```text
 pos-fullstack/
-  start.bat  start.sh  backup.bat  schedule-backup.bat  docker-compose.yml  README.md
-  backend/
-    main.py  database.py  auth.py  catalog.py  purchasing.py  history.py
-    secure\\\_db.py  init\\\_db.py  manage\\\_users.py  backup.py  migrate\\\_sqlite\\\_to\\\_postgres.py
-    requirements.txt  .env.example
-    tests/  test\\\_backend.py  test\\\_security.py  test\\\_hardened.py
-  frontend/
-    src/  App.tsx  api.ts  auth.tsx  SecurityPage.tsx  CatalogPage.tsx
-          PurchasingPages.tsx  HistoryPage.tsx  \\\*.css
-  tests-ui/  ui-clickthrough.mjs  README.md
-  docs/screenshots/
+├── backend/
+│   ├── main.py
+│   ├── database.py
+│   ├── auth.py
+│   ├── catalog.py
+│   ├── purchasing.py
+│   ├── history.py
+│   ├── backup.py
+│   ├── secure_db.py
+│   ├── init_db.py
+│   ├── manage_users.py
+│   ├── migrate_sqlite_to_postgres.py
+│   └── tests/
+│
+├── frontend/
+│   └── src/
+│       ├── App.tsx
+│       ├── api.ts
+│       ├── auth.tsx
+│       ├── CatalogPage.tsx
+│       ├── PurchasingPages.tsx
+│       ├── HistoryPage.tsx
+│       └── SecurityPage.tsx
+│
+├── docs/
+│   └── screenshots/
+│
+├── tests-ui/
+│   └── ui-clickthrough.mjs
+│
+├── docker-compose.yml
+└── README.md
 ```
 
-## API overview
+---
 
-All reads are `GET`, all writes are `POST`. Every route needs a login except `GET /auth/status`, `POST /auth/setup` and `POST /auth/login`. Every non-GET request must send the header `X-POS: 1`.
+## Current Implementation
 
-|Area|Routes|
-|-|-|
-|Auth|`/auth/status`, `/auth/setup`, `/auth/login`, `/auth/logout`, `/auth/password`, `/auth/pin`|
-|People (owner)|`/users`, `/users/{id}/update`, `/users/{id}/password`, `/users/{id}/pin`, `/users/{id}/active`, `/users/{id}/unlock`, `/security/policy`|
-|Selling|`/inventory`, `/scan`, `/cart`, `/cart/remove`, `/cart/set`, `/cart/clear`, `/checkout`, `/inventory/adjust`, `/sales`, `/sales/{id}`, `/sales/{id}/refund`, `/movements`, `/dashboard`, `/events`|
-|Catalog (manager)|`/catalog/meta`, `/catalog/products`, `/catalog/products/{id}/update`, `/catalog/products/{id}/active`, `/catalog/products/{id}/history`|
-|Purchasing (manager)|`/suppliers`, `/purchase-orders` (`cancel`, `close`, `receive`), `/purchases` (`pay`), `/expenses` (`void`), `/reports/purchases`|
-|History (manager)|`/history`, `/history/meta`|
+The current implementation provides an end-to-end retail workflow covering:
 
-Every route must have an entry in the permission table (`POLICY` in `backend/auth.py`). The app refuses to start otherwise.
+- POS selling
+- Real-time inventory
+- Product catalog management
+- Purchasing and stock receiving
+- Invoices and refunds
+- Expenses
+- Business reports
+- User roles and permissions
+- Manager approval
+- Authentication and security controls
+- Audit/history tracking
+- PostgreSQL persistence
+- Backup and migration support
+- Automated backend/security test coverage
+- UI click-through testing
 
-\---
+The screenshots above represent the current application interface and workflow.
 
-## Known limitations
+---
 
-* Anyone with the `postgres` or owner `pos` password can still change anything. Anyone who can read the POS computer's files can read `.env` and `pos\\\_secret.key`.
-* Traffic is plain HTTP. Add HTTPS before using more than one till on a shop network.
-* No idle auto-lock (a login lasts up to 12 hours). A cashier can remove cart items without approval.
-* One global cart (not per till), no cart timeout, and cart totals use the live price until checkout.
-* Weights are typed by hand (no scale hookup or weight barcodes). Refunds do not record cash handed back.
-* Tax rate, low-stock threshold and discount codes are hardcoded. The Settings page is a placeholder.
-* Cash-flow is not profit (no cost of goods per sale). Dashboard stock value uses selling price, not cost.
-* A purchase order cannot be edited after creation. No supplier returns. No bulk import, barcode generation or product images.
-* The live-update counter is in-process, so the backend must run as a single process.
-* Not yet tested on real hardware: barcode scanner, weighing scale, tills over a network.
+## Notes
 
+The application is currently designed for **local operation**. The existing implementation also documents several operational boundaries, including:
+
+- HTTP is used locally rather than HTTPS.
+- The application uses a single backend process because live-update state is maintained in-process.
+- Weighed products currently rely on manually entered quantities rather than a hardware scale integration.
+- There is one global cart rather than separate carts per till.
+- Some store-level settings remain fixed in the current implementation.
+- Real-world hardware such as barcode scanners, weighing scales and networked tills requires hardware-specific testing before deployment.
+
+These are implementation boundaries of the current version rather than gaps in the core POS workflow.
+
+---
+
+## Summary
+
+This project provides a complete local POS workflow in which **selling, inventory, purchasing, refunds, expenses, reporting, security and audit history work together around the same underlying data model**.
+
+The result is a system where a retail transaction is not isolated: the sale affects stock, the stock change is recorded, the invoice remains available for review, refunds can restore inventory, purchasing can replenish stock, reports summarize activity, and History provides an audit trail of who performed and approved important actions.
