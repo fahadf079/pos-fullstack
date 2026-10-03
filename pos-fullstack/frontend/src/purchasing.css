@@ -1,0 +1,35 @@
+/* Purchasing + Reports pages. Scoped under .pm so it never touches the existing screens. */
+.pm h2{font-size:14px;margin:16px 0 6px}
+.pm-tabs{display:flex;gap:4px;margin:0 0 14px;border-bottom:1px solid #ddd}
+.pm-tab{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;margin:0}
+.pm-tab.on{border-bottom-color:#111;font-weight:600}
+.pm-row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:8px 0}
+.pm-row label{display:flex;flex-direction:column;font-size:12px;color:#666;gap:2px}
+.pm-row input,.pm-row select{width:auto;padding:8px;border:1px solid #bbb;margin:0}
+.pm-row input[type=number]{width:110px}
+.pm-grow{flex:1;min-width:140px}
+.pm-row input.pm-grow,.pm-row label.pm-grow input{width:100%}
+.pm select{padding:7px;border:1px solid #bbb;background:#fff}
+.pm-card{background:#fff;border:1px solid #ddd;padding:14px 16px;margin:8px 0}
+.pm-card h3{margin:0 0 6px}.pm-card h3 small{font-weight:400;font-size:12px;color:#666;margin-left:6px}
+.pm-table td input{width:100%;margin:0}
+.pm-table td input[type=number]{width:90px}
+.pm-table th{font-size:12px;color:#666}
+.pm-inner{background:#fafafa}
+.pm-actions{white-space:nowrap}
+.pm-click{cursor:pointer}.pm-click:hover{background:#f6f6f6}
+.pm-empty{text-align:center;color:#888;padding:16px}
+.pm-dim{opacity:.55}
+.pm-hint{color:#888;font-size:12px;margin:4px 0}
+.pm-msg{padding:8px;margin:8px 0}.pm-bad{background:#fde4e4;color:#a00}.pm-ok{background:#e4f6ea;color:#186a2b}
+.pm-warn{color:#b45309;font-size:13px}
+.pm-tag{margin-left:8px;font-size:10px;background:#e0ecff;color:#1d4ed8;padding:2px 6px}
+.pm-link{background:none;border:0;color:#1d4ed8;font-size:12px;padding:2px 0}
+.pm-check{display:flex;flex-direction:row!important;align-items:center;gap:6px;font-size:13px;color:#111!important}
+.pm-check input{width:auto!important;margin:0}
+.pm-newprod{display:grid;grid-template-columns:1fr 1.5fr 1fr 1fr;gap:6px}
+.pm-primary{background:#111;color:#fff;border-color:#111}
+.pm-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin:12px 0}
+.pm-kpi{background:#fff;border:1px solid #ddd;padding:10px;color:#666}
+.pm-kpi-l{font-size:12px}.pm-kpi-v{font-size:20px;font-weight:600;color:#111;margin-top:2px}
+.pm-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
