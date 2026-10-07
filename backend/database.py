@@ -102,7 +102,7 @@ class Result:
 
 # tables whose primary key is a serial `id` — INSERTs into them return it as .lastrowid
 _ID_TABLES = {"products", "movements", "sales", "refunds", "product_log", "suppliers", "purchase_orders",
-              "po_items", "receipts", "receipt_items", "expenses", "audit_log", "users"}
+              "po_items", "receipts", "receipt_items", "expenses", "audit_log", "users", "alerts", "shifts", "drawer_events", "shift_moves"}
 _INSERT = re.compile(r"^\s*INSERT\s+INTO\s+(\w+)", re.I)
 
 
@@ -197,7 +197,7 @@ def transaction(snapshot: bool = False):
     if _state.get():
         yield db
         return
-    st = {"bump": False}
+    st = {"bump": False, "after": []}
     with _get_pool().connection() as conn:       # commits on success, rolls back on any exception
         st["conn"] = conn
         tok = _state.set(st)
@@ -209,6 +209,20 @@ def transaction(snapshot: bool = False):
             _state.reset(tok)
     if st["bump"]:
         _bump_now()
+    for fn in st["after"]:                       # only reached when the transaction committed
+        try:
+            fn()
+        except Exception:
+            pass
+
+
+def after_commit(fn) -> None:
+    """Run fn once the surrounding transaction has COMMITTED (never if it rolls back). Outside a transaction: now."""
+    st = _state.get()
+    if st:
+        st["after"].append(fn)
+    else:
+        fn()
 
 
 @contextmanager
@@ -448,9 +462,9 @@ CREATE TABLE IF NOT EXISTS users(
   id BIGSERIAL PRIMARY KEY,
   username TEXT NOT NULL,
   full_name TEXT NOT NULL DEFAULT '',
-  role TEXT NOT NULL CHECK (role IN ('owner','manager','cashier')),
-  pw_hash TEXT NOT NULL,
-  pin_hash TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('owner','employee','developer','guest')),
+  pw_hash TEXT,
+  pin_hash TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   must_change INTEGER NOT NULL DEFAULT 0,
   failed_logins INTEGER NOT NULL DEFAULT 0,
@@ -460,6 +474,11 @@ CREATE TABLE IF NOT EXISTS users(
   created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_login_ts TIMESTAMPTZ
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_codes JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS removed INTEGER NOT NULL DEFAULT 0;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_users_name ON users(lower(username));
 CREATE TABLE IF NOT EXISTS sessions(
   token_hash TEXT PRIMARY KEY,
@@ -471,6 +490,75 @@ CREATE TABLE IF NOT EXISTS sessions(
   agent TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS locked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_input_ts TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE refunds ADD COLUMN IF NOT EXISTS user_id INTEGER;
+ALTER TABLE refunds ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'system';
+ALTER TABLE refunds ADD COLUMN IF NOT EXISTS paid_via TEXT;
+CREATE TABLE IF NOT EXISTS settings(
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by TEXT NOT NULL DEFAULT 'system'
+);
+CREATE TABLE IF NOT EXISTS alerts(
+  id BIGSERIAL PRIMARY KEY,
+  key TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('critical','warning','info')),
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  raised_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  times INTEGER NOT NULL DEFAULT 1,
+  resolved_ts TIMESTAMPTZ,
+  ack_ts TIMESTAMPTZ,
+  ack_by TEXT,
+  ack_user_id INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_open ON alerts(key) WHERE resolved_ts IS NULL;
+CREATE TABLE IF NOT EXISTS shifts(
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id),
+  actor TEXT NOT NULL,
+  opened_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  opening_float NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (opening_float >= 0),
+  open_sale_id BIGINT NOT NULL DEFAULT 0,
+  open_refund_id BIGINT NOT NULL DEFAULT 0,
+  closed_ts TIMESTAMPTZ,
+  counted_cash NUMERIC(14,2),
+  expected_cash NUMERIC(14,2),
+  variance NUMERIC(14,2),
+  note TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_shift_open ON shifts(user_id) WHERE closed_ts IS NULL;
+CREATE TABLE IF NOT EXISTS drawer_events(
+  id BIGSERIAL PRIMARY KEY,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  user_id INTEGER,
+  actor TEXT NOT NULL DEFAULT 'system',
+  kind TEXT NOT NULL,
+  sale_id BIGINT,
+  reason TEXT NOT NULL DEFAULT '',
+  ok INTEGER NOT NULL DEFAULT 1,
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS shift_moves(
+  id BIGSERIAL PRIMARY KEY,
+  shift_id BIGINT NOT NULL REFERENCES shifts(id),
+  user_id BIGINT NOT NULL REFERENCES users(id),
+  actor TEXT NOT NULL,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  kind TEXT NOT NULL CHECK (kind IN ('drop','payout','add')),
+  amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_shift_moves_shift ON shift_moves(shift_id);
+CREATE TABLE IF NOT EXISTS vault(
+  ref TEXT PRIMARY KEY,
+  sealed TEXT NOT NULL,
+  updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by TEXT NOT NULL DEFAULT 'system'
+);
 
 CREATE OR REPLACE FUNCTION pos_append_only() RETURNS trigger AS $fn$
 BEGIN
@@ -480,14 +568,15 @@ $fn$ LANGUAGE plpgsql;
 """
 
 # history-style tables the app must never edit or delete from
-APPEND_ONLY = ("audit_log", "movements", "product_log")
+APPEND_ONLY = ("audit_log", "movements", "product_log", "drawer_events", "shift_moves")
 
 
 # What the app's own (restricted) database login may do. It can NOT edit or delete history, delete sales,
 # change table structure, drop anything or switch off the append-only triggers: only the owner can.
-_RW = ("products", "sales", "refunds", "suppliers", "purchase_orders", "po_items", "receipts", "receipt_items", "expenses", "users")
-_FULL = ("cart", "sessions")
-_APPEND = ("movements", "audit_log", "product_log")
+_RW = ("products", "sales", "refunds", "suppliers", "purchase_orders", "po_items", "receipts", "receipt_items", "expenses", "users",
+       "settings", "alerts", "shifts")
+_FULL = ("cart", "sessions", "vault")
+_APPEND = ("movements", "audit_log", "product_log", "drawer_events", "shift_moves")
 
 
 def _grant_app_role(c) -> None:
@@ -501,10 +590,26 @@ def _grant_app_role(c) -> None:
     c.execute(f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE}")
 
 
+# Upgrading a v10 database (roles owner/manager/cashier, a password + PIN for everyone) to the v11 model
+# (owner/employee/developer/guest; passwords only for owner/developer, PIN only for employees). Safe to repeat.
+MIGRATE = [
+    "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check",
+    "UPDATE users SET role='owner' WHERE role='manager'",
+    "UPDATE users SET role='employee' WHERE role='cashier'",
+    "ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('owner','employee','developer','guest'))",
+    "ALTER TABLE users ALTER COLUMN pw_hash DROP NOT NULL",
+    "ALTER TABLE users ALTER COLUMN pin_hash DROP NOT NULL",
+    "UPDATE users SET pw_hash=NULL, must_change=0 WHERE role='employee'",
+    "UPDATE users SET pin_hash=NULL WHERE role IN ('owner','developer')",
+]
+
+
 def _ddl(c) -> None:
     c.execute("SELECT pg_advisory_xact_lock(727001)")           # two app processes starting together
     for stmt in [s.strip() for s in re.split(r";\s*\n(?=CREATE|ALTER|DROP)", SCHEMA) if s.strip()]:
         c.execute(stmt.rstrip(";"))
+    for stmt in MIGRATE:
+        c.execute(stmt)
     for t in APPEND_ONLY:
         c.execute(f"DROP TRIGGER IF EXISTS {t}_no_edit ON {t}")
         c.execute(f"CREATE TRIGGER {t}_no_edit BEFORE UPDATE OR DELETE ON {t} FOR EACH ROW EXECUTE FUNCTION pos_append_only()")
@@ -514,10 +619,12 @@ def _ddl(c) -> None:
 
 
 def _schema_current() -> bool:
-    r = db.execute("SELECT (SELECT count(*) FROM information_schema.columns WHERE table_name='audit_log' AND column_name='approved_by')"
-                   " + (SELECT count(*) FROM information_schema.columns WHERE table_name='movements' AND column_name='actor')"
-                   " + (SELECT count(*) FROM information_schema.tables WHERE table_name IN ('users','sessions'))").fetchone()
-    return r[0] == 4
+    """True when every table/column this version needs exists (the restricted login can't create them)."""
+    tables = ("users", "sessions", "settings", "alerts", "shifts", "drawer_events", "shift_moves", "vault")
+    cols = (("audit_log", "approved_by"), ("movements", "actor"), ("users", "totp_enabled"), ("users", "removed"), ("sessions", "locked"), ("refunds", "actor"), ("refunds", "paid_via"))
+    n = db.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(tables),)).fetchone()[0]
+    m = sum(db.execute("SELECT count(*) FROM information_schema.columns WHERE table_name=? AND column_name=?", (t, c)).fetchone()[0] for t, c in cols)
+    return n == len(tables) and m == len(cols)
 
 
 def init(admin_url: str | None = None) -> None:

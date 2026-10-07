@@ -16,3 +16,4 @@
 .hs tr.hs-detail pre{margin:0;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
 .hs .hs-pager{display:flex;gap:12px;align-items:center;margin-top:8px}
 .hs .hs-auth{background:#e0e7ff;color:#2b3a8a}.hs .hs-user{background:#ffe0f0;color:#8a1f5a}
+.hs .hs-alert{background:#ffe3e3;color:#a00}.hs .hs-settings,.hs .hs-network{background:#e0f0ff;color:#0b4a8a}.hs .hs-shift,.hs .hs-drawer{background:#fff0d6;color:#8a5200}.hs .hs-integration{background:#eadcff;color:#4b238a}

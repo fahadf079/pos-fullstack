@@ -98,7 +98,6 @@ export function Catalog({ tick }: { tick: number }) {
   return (
     <div className="cg">
       <h1>Catalog <small>(live)</small></h1>
-      <p className="hint">Prices, names, categories and units are managed here. Stock is <b>not</b> changed here: it comes from Purchasing (receiving) and Inventory (Adjust). The barcode can't be edited, because the stock history and old invoices refer to it.</p>
       {msg && <div className={`cg-msg ${msg.kind}`}>{msg.text}</div>}
       {(noPrice > 0 || below > 0) && (
         <div className="cg-msg warn">
@@ -116,6 +115,7 @@ export function Catalog({ tick }: { tick: number }) {
       {adding && (
         <div className="cg-form">
           <label>Barcode / SKU<input value={nf.sku} maxLength={40} onChange={(e) => setNf({ ...nf, sku: e.target.value })} /></label>
+          <button type="button" onClick={() => void req<{ sku: string }>("/catalog/next-barcode").then((r) => setNf((x) => ({ ...x, sku: r.sku }))).catch((e: Error) => setMsg({ kind: "bad", text: e.message }))}>Make a barcode</button>
           <label>Name<input value={nf.name} maxLength={120} onChange={(e) => setNf({ ...nf, name: e.target.value })} /></label>
           <label>Category<input list="cg-cats" value={nf.cat} placeholder="Grocery" maxLength={40} onChange={(e) => setNf({ ...nf, cat: e.target.value })} /></label>
           <label>Sold by

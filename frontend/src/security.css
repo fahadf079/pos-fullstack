@@ -16,3 +16,21 @@
 nav .who{color:#888;font-size:12px;padding:8px 8px 0;word-break:break-word}
 .sx-check{display:flex;align-items:center;gap:6px;font-size:13px;color:#444;white-space:nowrap}.sx-check input{width:auto;margin:0}
 .sx-add .sx-check{white-space:normal}
+/* v11: sign-in tiles, keypad, lock screen, alert bar, settings */
+.sx-card.wide{width:520px}
+.sx-tabs{display:flex;gap:6px;margin-bottom:10px}.sx-tabs button{flex:1;margin:0}.sx-tabs button.on{background:#111;color:#fff}
+.sx-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.sx-tile{padding:18px 8px;font-size:15px;margin:0;background:#f7f7f7}
+.sx-pin{font-size:22px;text-align:center;letter-spacing:6px;margin-bottom:6px}
+.sx-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0}.sx-keypad button{padding:14px 0;font-size:18px;margin:0}
+.sx-guest{width:100%;margin-top:14px;color:#555}
+.sx-lock{position:fixed;inset:0;background:#e9e9e9;z-index:200;display:flex;align-items:center;justify-content:center}
+.sx-alerts{position:sticky;top:0;z-index:40}
+.sx-alert{padding:10px 14px;margin:0 0 4px;border-left:6px solid #888;background:#fff;display:flex;gap:12px;align-items:flex-start;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.sx-alert.critical{border-color:#c00;background:#fff0f0}.sx-alert.warning{border-color:#d98300;background:#fff8e8}
+.sx-alert .t{flex:1}.sx-alert b{display:block}.sx-alert small{color:#666}
+.sx-gbar{background:#eef;color:#336;padding:6px 12px;margin-bottom:8px;font-size:13px}
+.sx-ips label{display:block;margin:4px 0}.sx-ips code{background:#eee;padding:1px 5px}
+.sx-codes{columns:2;font-family:monospace;background:#fffbe6;border:1px dashed #b90;padding:10px;max-width:320px}
+.sx-two{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.sx-sec h3{font-size:13px;margin:12px 0 4px}

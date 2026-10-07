@@ -10,13 +10,14 @@ Rules (behaviour to preserve)
   * A deactivated product can't be scanned, ordered or picked, but keeps its history and stock,
     and refunds of old sales still put its stock back.
 """
+import re
 from typing import Optional
 
 import psycopg
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-import auth
+import credentials
 from database import audit, now as _now, transaction
 
 router = APIRouter()
@@ -190,7 +191,7 @@ def update_product(pid: int, b: ProductPatch):
                 changes.append(("unit", r["unit"], u))
 
         if "price" in sets or "cost" in sets:
-            auth.confirm("self")                 # changing what something sells for / costs needs your own PIN
+            credentials.confirm("self")                 # changing what something sells for / costs needs your own PIN
         if sets:
             c.execute("UPDATE products SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE id=?", (*sets.values(), pid))
             for field, old, new in changes:
@@ -226,3 +227,69 @@ def history(pid: int, limit: int = 50):
                          (pid, max(1, min(limit, 500)))).fetchall()
     return [dict(r) for r in rows]
 
+
+
+# ───────────────────────────── new barcodes and bulk import (v12) ─────────────────────────────
+def ean13_check(code12: str) -> str:
+    d = [int(c) for c in code12]
+    return str((10 - (sum(d[i] * (3 if i % 2 else 1) for i in range(12)) % 10)) % 10)
+
+
+@router.get("/catalog/next-barcode")
+def next_barcode():
+    """An unused in-shop barcode for a product that has none: '999' + 9-digit running number + EAN-13 check digit.
+    (999 is a range not issued to manufacturers for products, so it never clashes with a real product's code, and it does
+    not start with 2, so it is never mistaken for a weighed-item label.) Nothing is reserved until the product is saved."""
+    with db() as c:
+        top = c.execute("SELECT COALESCE(MAX(substr(sku,4,9)::bigint),0) FROM products WHERE sku ~ '^999[0-9]{10}$'").fetchone()[0]
+    body = "999" + str(int(top) + 1).zfill(9)
+    return {"sku": body + ean13_check(body)}
+
+
+class ImportRow(BaseModel):
+    sku: str = Field(max_length=40)
+    name: str = Field(max_length=120)
+    cat: str = Field(default="Grocery", max_length=40)
+    unit: str = Field(default="pc", max_length=4)
+    price: float
+    cost: float = 0
+
+
+class ImportIn(BaseModel):
+    rows: list[ImportRow] = Field(max_length=2000)
+    dry_run: bool = True
+
+
+@router.post("/catalog/import")
+def import_products(b: ImportIn):
+    """Adds many NEW products at once (stock starts at 0; opening stock comes through a purchase order or a stock count).
+    All or nothing: if any row is wrong nothing is saved and every problem is listed with its row number. dry_run=true only checks."""
+    if not b.rows:
+        raise HTTPException(422, "There are no rows to import.")
+    errors: list[dict] = []
+    seen: dict[str, int] = {}
+    clean = []
+    with db(True) as c:
+        existing = {r[0] for r in c.execute("SELECT sku FROM products").fetchall()}
+        for n, r in enumerate(b.rows, start=1):
+            sku, name, cat, unit = _clean(r.sku), _clean(r.name), _clean(r.cat) or "Grocery", _clean(r.unit) or "pc"
+            def bad(msg): errors.append({"row": n, "sku": sku, "error": msg})
+            if not sku or not name: bad("Barcode and name are required."); continue
+            if re.search(r"\s", sku): bad("A barcode can't contain spaces."); continue
+            if unit not in UNITS: bad(f"Unit must be one of: {', '.join(UNITS)}."); continue
+            if not (0 < r.price <= 10_000_000): bad("Price must be above 0."); continue
+            if not (0 <= r.cost <= 10_000_000): bad("Cost can't be negative."); continue
+            if sku in existing: bad("This barcode already exists in the catalog."); continue
+            if sku in seen: bad(f"Same barcode as row {seen[sku]}."); continue
+            seen[sku] = n
+            clean.append((sku, name, cat, unit, money(r.price), money(r.cost)))
+        if errors:
+            return {"ok": False, "saved": 0, "errors": errors[:200], "error_count": len(errors), "checked": len(b.rows)}
+        if b.dry_run:
+            return {"ok": True, "saved": 0, "would_add": len(clean), "errors": [], "checked": len(b.rows)}
+        for sku, name, cat, unit, price, cost in clean:
+            pid = c.execute("INSERT INTO products(sku, name, cat, price, stock, cost, unit, active) VALUES (?,?,?,?,0,?,?,1)", (sku, name, cat, price, cost, unit)).lastrowid
+            _log(c, {"id": pid, "sku": sku, "name": name}, "created", None, f"price {price:g}, unit {unit} (bulk import)")
+        audit("catalog.import", "product", "", f"Bulk import: {len(clean)} new product(s)", {"count": len(clean)})
+    _bump()
+    return {"ok": True, "saved": len(clean), "errors": [], "checked": len(b.rows)}

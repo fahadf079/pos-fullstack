@@ -52,10 +52,20 @@ echo [3/4] PostgreSQL: OK
 
 rem ---------- 5. Start the backend in its own window and wait until it answers ----------
 echo [4/4] Starting the backend and the screen...
-start "POS backend" /d "%~dp0backend" cmd /k python -m uvicorn main:app --reload --port 8000 --timeout-graceful-shutdown 2
+if exist "%~dp0backend\.env" for /f "usebackq tokens=1,* delims==" %%a in (`findstr /b /c:"POS_BIND_HOST=" "%~dp0backend\.env"`) do set "POS_BIND_HOST=%%b"
+if not defined POS_BIND_HOST set "POS_BIND_HOST=127.0.0.1"
+set "POS_SSL="
+set "POS_SCHEME=http"
+if exist "%~dp0backend\certs\pos.pem" if exist "%~dp0backend\certs\pos-key.pem" (
+  set "POS_SSL=--ssl-certfile certs/pos.pem --ssl-keyfile certs/pos-key.pem"
+  set "POS_SCHEME=https"
+  set "POS_COOKIE_SECURE=1"
+  echo      HTTPS is ON: certificate found in backend\certs
+)
+start "POS backend" /d "%~dp0backend" cmd /k python -m uvicorn main:app --reload --host %POS_BIND_HOST% --port 8000 --timeout-graceful-shutdown 2 %POS_SSL%
 set /a TRIES=0
 :waitbackend
-python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/auth/status', timeout=2)" >nul 2>nul
+python -c "import urllib.request, ssl; urllib.request.urlopen('%POS_SCHEME%://127.0.0.1:8000/auth/status', timeout=2, context=ssl._create_unverified_context())" >nul 2>nul
 if not errorlevel 1 goto backend_ok
 set /a TRIES+=1
 if %TRIES% GEQ 40 goto backendfail
@@ -66,9 +76,9 @@ goto waitbackend
 rem ---------- 6. Start the screen and open the browser ----------
 start "POS frontend" /d "%~dp0frontend" cmd /k npm run dev
 timeout /t 5 >nul
-start "" http://localhost:5173
+start "" %POS_SCHEME%://localhost:5173
 echo.
-echo  Running. The POS opens in your browser: http://localhost:5173
+echo  Running. The POS opens in your browser: %POS_SCHEME%://localhost:5173
 echo  Keep the two black windows (POS backend, POS frontend) open while you work.
 echo  The very first time you will see First-time setup: create the owner account.
 echo.

@@ -4,8 +4,9 @@ HERE = os.path.dirname(os.path.abspath(__file__)); BACK = os.path.dirname(HERE);
 # the test refuses to touch anything else (your real "pos" database is never used).
 TEST_URL = os.environ.get("POS_TEST_DATABASE_URL", "postgresql://pos:pos@localhost:5432/pos_test")
 assert TEST_URL.split("?")[0].rstrip("/").endswith("_test"), "POS_TEST_DATABASE_URL must point at a database whose name ends in _test"
+os.environ["POS_THROTTLE_MAX"] = "1000000"      # the sign-in throttle is tested separately (test_v12.py)
 os.environ["DATABASE_URL"] = TEST_URL
-os.environ["POS_SECRET_KEY"] = "test-secret-key"; os.environ["POS_ALLOW_REMOTE_SETUP"] = "1"   # no key file written; TestClient is not "localhost"
+os.environ["POS_SECRET_KEY"] = "test-secret-key"; os.environ["POS_ALLOW_REMOTE_SETUP"] = "1"; os.environ["POS_TEST_MODE"] = "1"   # no key file written; TestClient is not "localhost"
 import psycopg
 with psycopg.connect(TEST_URL, autocommit=True) as _c:
     _c.execute("DROP SCHEMA public CASCADE"); _c.execute("CREATE SCHEMA public")
@@ -14,12 +15,11 @@ import main, database
 c = TestClient(main.app)
 def ok(r, code=200):
     assert r.status_code == code, (r.status_code, r.text); return r.json()
-# Every route needs a login: create the owner once, then this client acts as the owner (cookie kept by the client)
+# Since v10 every route needs a login: create the owner once, then this client acts as the owner (cookie kept by the client)
 c.headers["X-POS"] = "1"
-ok(c.post("/auth/setup", json={"username": "owner", "full_name": "Test Owner", "password": "Owner-pass-1", "pin": "4829"}))
+ok(c.post("/auth/setup", json={"username": "owner", "full_name": "Test Owner", "password": "Owner-pass-1"}))
 def newc(**kw):                           # another client logged in as the same owner (for the concurrency tests)
     n = TestClient(main.app, **kw); n.cookies.update(c.cookies); n.headers.update(c.headers); return n
-c.headers["X-POS-PIN"] = "4829"          # the owner's PIN is sent with every request; it is only checked where a rule asks for it
 def stock(sku): return main.db.execute("SELECT stock FROM products WHERE sku=?", (sku,)).fetchone()[0]
 
 # --- migration kept old data, added cost column
@@ -110,7 +110,7 @@ ok(c.post(f"/expenses/{e}/void", json={"reason":""}), 422)                    # 
 ok(c.post(f"/expenses/{e}/void", json={"reason":"typo"})); ok(c.post(f"/expenses/{e}/void", json={"reason":"again"}), 409); ok(c.post("/expenses/99999/void", json={"reason":"x"}), 404)
 ok(c.post(f"/expenses/{e}/delete"), 404)                                      # hard delete is gone
 
-# ═════════════ catalog, price guards, deactivate, weight (kg / litre) items ═════════════
+# ═════════════ v7: catalog, price guards, deactivate, weight (kg / litre) items ═════════════
 def prod(sku): return next(x for x in ok(c.get("/catalog/products")) if x["sku"]==sku)
 ok(c.post("/cart/clear"))
 # --- create: price must be above 0, barcode unique, unit valid
@@ -133,7 +133,7 @@ hist = ok(c.get(f"/catalog/products/{tea['id']}/history"))
 assert [h["field"] for h in hist][:2]==["price","cat"] or "price" in [h["field"] for h in hist], hist
 assert any(h["field"]=="price" and h["old"]=="100" and h["new"]=="70" for h in hist), hist
 ok(c.post("/catalog/products/99999/update", json={"price":5}), 404)
-# --- legacy product with price 0 (created before the catalog existed) can't be sold by accident
+# --- legacy product with price 0 (created before v7) can't be sold by accident
 main.db.execute("INSERT INTO products(sku,name,cat,price,stock) VALUES('7770002','Legacy Zero','Snacks',0,5)"); main.db.commit()
 ok(c.post("/scan", json={"sku":"7770002"}), 409); assert stock("7770002")==5
 # --- PO: new product needs price > 0, unit valid
@@ -263,7 +263,7 @@ ok(c.post(f"/sales/{rl['id']}/refund", json={"note": "x"}), 409)
 print("PER-ITEM REFUNDS: ALL TESTS PASSED")
 
 
-# ═════════════ PostgreSQL — History (audit log), expense voiding, append-only guards, concurrency ═════════════
+# ═════════════ v9: PostgreSQL — History (audit log), expense voiding, append-only guards, concurrency ═════════════
 import psycopg.errors as pge
 def audit_rows(prefix=None):
     return [dict(r) for r in main.db.execute("SELECT * FROM audit_log" + (" WHERE action LIKE ?" if prefix else "") + " ORDER BY id", (prefix + "%",) if prefix else None).fetchall()]
@@ -274,7 +274,7 @@ acts = {e["action"] for e in H["entries"]}
 for a in ("sale.checkout", "sale.refund", "stock.adjust", "catalog.created", "catalog.price", "catalog.active", "po.created",
           "purchase.received", "purchase.paid" if False else "purchase.received", "supplier.added", "supplier.updated", "expense.added", "expense.voided"):
     assert a in acts, (a, sorted(acts))
-assert all(e["actor"] == "owner" and e["user_id"] is not None and e["approved_by"] is None for e in H["entries"])      # every line says WHO did it
+assert all(e["actor"] == "owner" and e["user_id"] is not None and e["approved_by"] is None for e in H["entries"])      # v10: every line says WHO did it
 cats = {x["category"] for x in ok(c.get("/history/meta"))["categories"]}; assert {"sale", "stock", "catalog", "purchase", "expense", "po", "supplier"} <= cats, cats
 assert all(e["action"].startswith("sale.") for e in ok(c.get("/history?category=sale"))["entries"])
 hit = ok(c.get("/history?q=Test%20Tea"))["entries"]; assert hit and all("tea" in (e["summary"] + e["entity_id"]).lower() for e in hit)

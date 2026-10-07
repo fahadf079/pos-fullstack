@@ -1,19 +1,23 @@
-"""POS Backend — FastAPI + PostgreSQL + login/roles/PIN (auth.py). Real-time inventory: stock is deducted the moment an item is
+"""POS Backend v12 — FastAPI + PostgreSQL + roles (employee PIN / owner password + 2FA / developer / guest), 1-minute lock, ordered request pipeline. Real-time inventory: stock is deducted the moment an item is
 scanned; every stock change is written to a movements ledger, every business event to the append-only
 History (audit_log), and every change is pushed to all open screens via Server-Sent Events.
 Run: pip install -r requirements.txt  ->  uvicorn main:app --reload --port 8000   (needs PostgreSQL: see README)"""
-import asyncio, json
+import asyncio, json, re
 from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import os
-import database, catalog, purchasing, history, auth
+import context, database, catalog, purchasing, history, auth, users, settings, alerts, netpolicy, pipeline, policy, credentials, cash, cardvault, profit
+from contextlib import asynccontextmanager
 from database import db, tx, audit, jl, now, bump, transaction
 
-TAX, LOW = 0.08, 5
-DISCOUNTS = {"SAVE10": 0.10, "SAVE20": 0.20}
+# Tax rate, the low-stock number and the discount codes now live in Settings (owner-editable); these helpers read them.
+def tax_rate(): return float(settings.get("tax_percent")) / 100
+def low_threshold(): return int(settings.get("low_stock"))
+def discount_rate(code):
+    return float(settings.get("discount_codes").get((code or "").strip().upper(), 0)) / 100
 SEED = [("8964001","Basmati Rice 1kg","Grocery",320,40),("8964002","Cooking Oil 1L","Grocery",580,25),
  ("8964003","Sugar 1kg","Grocery",180,50),("8964004","Milk 1L","Dairy",210,35),("8964005","Yogurt 500g","Dairy",150,30),
  ("8964006","Bread Loaf","Bakery",170,18),("8964007","Biscuits Pack","Snacks",120,60),("8964008","Chips Pack","Snacks",150,45),
@@ -25,6 +29,12 @@ with transaction():
         db.executemany("INSERT INTO products(sku,name,cat,price,stock) VALUES(?,?,?,?,?)", SEED)
 
 def rows(q, *a): return [dict(r) for r in db.execute(q, a).fetchall()]
+def sees_cost():
+    """What the shop pays for goods is the owner's business: employees and guests never get the cost column."""
+    u = context.get_ctx()
+    return bool(u and u.user["role"] in ("owner", "developer"))
+def public_product(p):
+    return p if sees_cost() else {k: v for k, v in p.items() if k != "cost"}
 def product(sku, lock=False):
     r = db.execute("SELECT * FROM products WHERE sku=?" + (" FOR UPDATE" if lock else ""), (sku,)).fetchone()
     if not r: raise HTTPException(404, f"No product with SKU {sku}")
@@ -32,6 +42,19 @@ def product(sku, lock=False):
 
 def q3(x): return round(float(x), 3)             # quantities: up to 3 decimals (kg / litre items); pieces stay whole
 def money(x): return round(float(x) + 1e-9, 2)   # rupees: 2 decimals
+def ean13_ok(code):
+    d = [int(c) for c in code]
+    return (10 - (sum(d[i] * (3 if i % 2 else 1) for i in range(12)) % 10)) % 10 == d[12]
+
+def scale_label(sku):
+    """A price-computing scale prints 13 digits: prefix 20-29, 5-digit item code, 5-digit grams, check digit. Returns
+    (item code, kilograms) or None when this is not such a label, or the Settings switch is off."""
+    if not settings.get("scale_barcodes") or not re.fullmatch(r"2\d{12}", sku or ""): return None
+    if not ean13_ok(sku): raise HTTPException(422, "This weighed-item barcode is damaged (wrong check digit). Scan it again.")
+    grams = int(sku[7:12])
+    if grams <= 0: raise HTTPException(422, "This weighed-item barcode has no weight on it.")
+    return sku[2:7], round(grams / 1000, 3)
+
 def qty_ok(p, q):
     """Validates a quantity for this product: above 0, and whole numbers for items sold by the piece."""
     q = q3(q)
@@ -62,24 +85,33 @@ def cart_lock(exclusive=False):
 
 def totals(code=None):
     sub = money(sum(round(r["price"] * r["qty"], 2) for r in db.execute("SELECT p.price,c.qty FROM cart c JOIN products p ON p.id=c.product_id")))
-    disc = money(sub * DISCOUNTS.get((code or "").upper(), 0))
-    tax = money((sub - disc) * TAX)
+    disc = money(sub * discount_rate(code))
+    tax = money((sub - disc) * tax_rate())
     return {"subtotal": sub, "discount": disc, "tax": tax, "total": money(sub - disc + tax)}
 
-# Every route goes through auth.authed (login, role, PIN). No interactive docs page: it would list the whole API to anyone.
-app = FastAPI(title="POS Backend", dependencies=[Depends(auth.authed)], docs_url=None, redoc_url=None, openapi_url=None)
+@asynccontextmanager
+async def lifespan(_):
+    task = asyncio.create_task(alerts.monitor_loop())          # background checker: network, backups (alerts.py)
+    try:
+        yield
+    finally:
+        task.cancel()
+
+# Every route goes through pipeline.guard (network → identity → lock → permission → PIN). No interactive docs page.
+app = FastAPI(title="POS Backend v12", dependencies=[Depends(pipeline.guard)], lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 # Only this shop's own screens may talk to the backend (this computer, or tills on the shop's private network).
 # Cookies need an explicit origin list, never "*". Override with POS_CORS_ORIGIN_REGEX if you serve the screen elsewhere.
 ORIGIN_RE = os.environ.get("POS_CORS_ORIGIN_REGEX", r"^https?://(localhost|127\.0\.0\.1|\[::1\]|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$")
 app.add_middleware(CORSMiddleware, allow_origin_regex=ORIGIN_RE, allow_credentials=True, allow_methods=["GET", "POST"],
-                   allow_headers=["Content-Type", "X-POS", "X-POS-PIN", "X-POS-Approver"])
+                   allow_headers=["Content-Type", "X-POS", "X-POS-PIN"])
 
 catalog.setup(bump)
 purchasing.setup(move, bump)
 app.include_router(catalog.router)
 app.include_router(purchasing.router)
 app.include_router(history.router)
-app.include_router(auth.router)
+for r_ in (auth.router, users.router, settings.router, alerts.router, netpolicy.router, pipeline.router, cash.router, cardvault.router, profit.router):
+    app.include_router(r_)
 
 class Scan(BaseModel): sku: str; qty: float = Field(1, gt=0, le=10000)          # qty<=0 used to ADD stock via /scan; decimals only for kg / l items
 class Remove(BaseModel): product_id: int; qty: float = Field(1, gt=0, le=10000)
@@ -87,27 +119,37 @@ class CartSet(BaseModel): product_id: int; qty: float = Field(ge=0, le=10000)   
 class Adjust(BaseModel): sku: str; new_stock: float = Field(ge=0, le=10_000_000); note: str = Field("manual count", max_length=200)
 class Checkout(BaseModel): payment_method: str; discount_code: Optional[str] = None
 class RefundLine(BaseModel): id: int; qty: float = Field(gt=0, le=10000)      # product id + quantity to take back
-class Refund(BaseModel): note: str = "refunded"; items: Optional[list[RefundLine]] = None   # items omitted = refund everything still refundable
+class Refund(BaseModel): note: str = "refunded"; items: Optional[list[RefundLine]] = None; paid_via: Optional[str] = None   # how the money went back: Cash / Card / Wallet (default: the way the customer paid)   # items omitted = refund everything still refundable
 
 @app.get("/inventory")
-def inventory(): return {"products": rows("SELECT * FROM products ORDER BY cat, name"), "low_threshold": LOW}
+def inventory(): return {"products": [public_product(p) for p in rows("SELECT * FROM products ORDER BY cat, name")], "low_threshold": low_threshold()}
 
 @app.post("/scan")  # scan = instant deduction + add to cart
 @tx
 def scan(r: Scan):
     cart_lock()
-    p = product(r.sku)
+    label = scale_label(r.sku.strip())
+    if label:                                                       # weighed item: the weight comes from the label, not from the till
+        code, kg = label
+        row = db.execute("SELECT sku FROM products WHERE sku IN (?, ?) ORDER BY (sku=?) DESC LIMIT 1", (code, code.lstrip("0") or "0", code)).fetchone()
+        if not row: raise HTTPException(404, f"No product with item code {code} (add it in Catalog with that code as its barcode)")
+        p = product(row["sku"])
+        if p.get("unit", "pc") == "pc": raise HTTPException(422, f'"{p["name"]}" is sold by the piece, but this label carries a weight. Set its unit to kg in Catalog.')
+        r.qty = kg
+    else:
+        p = product(r.sku)
     if not p["active"]: raise HTTPException(409, f'"{p["name"]}" is deactivated and can\'t be sold')
     if p["price"] <= 0: raise HTTPException(409, f'"{p["name"]}" has no selling price: set one in Catalog first')
     q = qty_ok(p, r.qty)
     db.execute("SELECT 1 FROM cart WHERE product_id=? FOR UPDATE", (p["id"],))   # same lock order everywhere: cart line, then product
     move(p, -q, "SCAN", "sold — in cart")
     db.execute("INSERT INTO cart(product_id,qty) VALUES(?,?) ON CONFLICT(product_id) DO UPDATE SET qty=ROUND((cart.qty+?)::numeric,3)", (p["id"], q, q))
-    return {"product": p}
+    return {"product": public_product(p)}
 
 @app.post("/cart/remove")  # removing from cart gives the stock back
 @tx
 def remove(r: Remove):
+    if settings.get("remove_needs_pin"): credentials.confirm("self")
     cart_lock()
     row = db.execute("SELECT qty FROM cart WHERE product_id=? FOR UPDATE", (r.product_id,)).fetchone()
     if not row: raise HTTPException(404, "Not in cart")
@@ -124,6 +166,7 @@ def cart_set(r: CartSet):
     cart_lock()
     row = db.execute("SELECT qty FROM cart WHERE product_id=? FOR UPDATE", (r.product_id,)).fetchone()
     if not row: raise HTTPException(404, "Not in cart")
+    if settings.get("remove_needs_pin") and r.qty < q3(row["qty"]): credentials.confirm("self")      # lowering a line is removing
     p = dict(db.execute("SELECT * FROM products WHERE id=?", (r.product_id,)).fetchone())
     new = qty_ok(p, r.qty) if r.qty > 0 else 0.0
     delta = q3(new - q3(row["qty"]))
@@ -135,6 +178,7 @@ def cart_set(r: CartSet):
 @app.post("/cart/clear")
 @tx
 def clear():
+    if settings.get("remove_needs_pin"): credentials.confirm("self")
     cart_lock(exclusive=True)
     for c in rows("SELECT * FROM cart ORDER BY product_id FOR UPDATE"):
         move(dict(db.execute("SELECT * FROM products WHERE id=?", (c["product_id"],)).fetchone()), c["qty"], "VOID", "cart cleared")
@@ -150,16 +194,20 @@ def cart(discount_code: Optional[str] = None):
 @tx
 def checkout(r: Checkout):
     if r.payment_method not in ("Cash", "Card", "Wallet"): raise HTTPException(400, "Invalid payment method")
-    if (r.discount_code or "").strip().upper() in DISCOUNTS:      # a discount needs a manager's PIN (a cashier: a manager approves)
-        auth.confirm("approval")
+    if discount_rate(r.discount_code) > 0:      # a discount needs the employee's own PIN
+        credentials.confirm("self")
+    if r.payment_method == "Cash": cash.require_shift_for_cash()
     cart_lock(exclusive=True)                                     # nothing can slip into the cart between totalling and saving
     c = cart(r.discount_code)
     if not c["items"]: raise HTTPException(400, "Cart is empty")
     t, ts = c["totals"], now()
     uid, who = database.actor_pair()
+    costs = {x["id"]: x["cost"] for x in rows("SELECT id, cost FROM products WHERE id = ANY(?)", [i["id"] for i in c["items"]])}
+    snap = [{**i, "cost": float(costs.get(i["id"]) or 0)} for i in c["items"]]       # cost-at-sale, for the profit report; hidden from employees
     sid = db.execute("INSERT INTO sales(ts,subtotal,discount,tax,total,discount_code,payment,items,user_id,actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (ts, t["subtotal"], t["discount"], t["tax"], t["total"], (r.discount_code or "").upper() or None, r.payment_method, json.dumps(c["items"]), uid, who)).lastrowid
+        (ts, t["subtotal"], t["discount"], t["tax"], t["total"], (r.discount_code or "").upper() or None, r.payment_method, json.dumps(snap), uid, who)).lastrowid
     db.execute("DELETE FROM cart")
+    if r.payment_method == "Cash": cash.open_for_sale(sid)         # drawer opens only for a saved cash sale (after the commit)
     audit("sale.checkout", "sale", sid, f"Sale #{sid}: {len(c['items'])} item(s), Rs {t['total']:g} by {r.payment_method}",
           {"total": t["total"], "payment": r.payment_method, "discount_code": (r.discount_code or "").upper() or None, "items": c["items"]})
     bump()
@@ -172,7 +220,7 @@ def adjust(r: Adjust):
     if p["unit"] == "pc" and abs(ns - round(ns)) > 1e-9: raise HTTPException(422, f'"{p["name"]}" is sold by the piece: enter a whole number')
     old = p["stock"]; move(p, q3(ns - old), "ADJUST", r.note)
     audit("stock.adjust", "product", p["sku"], f'{p["name"]}: stock {old:g} → {ns:g} ({r.note})', {"before": old, "after": ns, "note": r.note})
-    return {"product": p}
+    return {"product": public_product(p)}
 
 @app.get("/sales")  # History list — newest first
 def sales(limit: int = 100):
@@ -192,10 +240,12 @@ def sale_detail(sale_id: int):
         r = db.execute("SELECT * FROM sales WHERE id=?", (sale_id,)).fetchone()
         if not r: raise HTTPException(404, "Sale not found")
         d = dict(r); d["items"] = jl(d["items"])
+        if context.current_user()["role"] not in ("owner", "developer"):      # what the shop paid for an item is the owner's business
+            for i in d["items"]: i.pop("cost", None)
         done = refunded_qty(sale_id)
         legacy = bool(d["refunded"]) and not done          # whole-sale refund made before per-item refunds existed
         for i in d["items"]: i["refunded_qty"] = i["qty"] if legacy else q3(done.get(i["id"], 0))
-        d["refunds"] = rows("SELECT id,ts,note,amount FROM refunds WHERE sale_id=? ORDER BY id", sale_id)
+        d["refunds"] = rows("SELECT id,ts,note,amount,paid_via FROM refunds WHERE sale_id=? ORDER BY id", sale_id)
         d["refunded_amount"] = money(d.get("refunded_amount") or 0)
         return d
 
@@ -241,11 +291,14 @@ def refund(sale_id: int, r: Refund):
         net = money(gross * (sub - (row["discount"] or 0)) / sub) if sub > 0 else 0.0
     ts = now()
     detail = [{"id": l["id"], "name": l["name"], "qty": l["qty"], "unit": l.get("unit", "pc"), "price": l["price"], "amount": l["amount"]} for l in lines]
-    db.execute("INSERT INTO refunds(sale_id,ts,note,amount,net,items) VALUES(?,?,?,?,?,?)", (sale_id, ts, note, amount, net, json.dumps(detail)))
+    ruid, rwho = database.actor_pair()
+    paid_via = r.paid_via or row["payment"]
+    if paid_via not in ("Cash", "Card", "Wallet"): raise HTTPException(422, "Money can go back as Cash, Card or Wallet.")
+    db.execute("INSERT INTO refunds(sale_id,ts,note,amount,net,items,user_id,actor,paid_via) VALUES(?,?,?,?,?,?,?,?,?)", (sale_id, ts, note, amount, net, json.dumps(detail), ruid, rwho, paid_via))
     db.execute("UPDATE sales SET refunded=?, refund_note=?, refund_ts=?, refunded_amount=ROUND((COALESCE(refunded_amount,0)+?)::numeric,2), refunded_net=ROUND((COALESCE(refunded_net,0)+?)::numeric,2) WHERE id=?",
                (1 if completes else 0, note, ts, amount, net, sale_id))
     audit("sale.refund", "sale", sale_id, f"Refund on sale #{sale_id}: Rs {amount:g} ({'complete' if completes else 'partial'}) — {note}",
-          {"amount": amount, "complete": completes, "reason": note, "items": detail})
+          {"amount": amount, "complete": completes, "reason": note, "paid_via": paid_via, "items": detail})
     bump()
     return {"ok": True, "refunded_amount": amount, "complete": completes}
 
@@ -262,15 +315,18 @@ def dashboard():
         top = sorted(sold.items(), key=lambda x: -x[1])[:5]
         return {"transactions": len(s), "revenue": money(sum(t["total"] for t in s)), "items_sold": q3(sum(sold.values())),
                 "top_items": [{"name": n, "qty": q} for n, q in top],
-                "low_stock": rows("SELECT sku,name,stock,unit FROM products WHERE active=1 AND stock<=? ORDER BY stock", LOW),
+                "low_stock": rows("SELECT sku,name,stock,unit FROM products WHERE active=1 AND stock<=? ORDER BY stock", low_threshold()),
                 "stock_value": db.execute("SELECT COALESCE(SUM(price*stock),0) FROM products").fetchone()[0]}
 
 @app.get("/events")  # live push: browser refetches whenever `version` changes
 async def events(request: Request):
     async def gen():
-        seen, idle = -1, 0
+        seen, idle, seen_alert = -1, 0, -1
         try:
             while not await request.is_disconnected():
+                if alerts.VERSION != seen_alert:                # HIGH priority first: an alert is announced before any stock/sale change
+                    seen_alert = alerts.VERSION
+                    yield f"event: alert\ndata: {seen_alert}\n\n"
                 v = database.get_version()
                 if v != seen:
                     seen, idle = v, 0
@@ -284,7 +340,7 @@ async def events(request: Request):
             return
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
-# Must stay LAST: checks that every route above has a permission rule in auth.POLICY (refuses to start otherwise).
-auth.install(app)                      # refuses to start if any route has no permission rule
+# Must stay LAST: checks that every route above has a permission rule in policy.POLICY (refuses to start otherwise).
+policy.install(app)                    # refuses to start if any route has no permission rule
 if auth.no_users():
     print("\n*** No users yet: open the POS in the browser and create the OWNER account (first-time setup). ***\n")

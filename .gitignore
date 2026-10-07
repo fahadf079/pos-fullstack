@@ -2,13 +2,7 @@ backend/.env
 backend/.env.bak
 backend/pos_secret.key
 backups/
-*.dump
-*.db
-*.sqlite
 __pycache__/
 frontend/node_modules/
 frontend/dist/
-tests-ui/node_modules/
 *.tsbuildinfo
-.DS_Store
-Thumbs.db

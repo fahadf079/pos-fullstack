@@ -37,7 +37,7 @@ export function History({ tick }: { tick: number }) {
 
   return (
     <div className="hs">
-      <h1>History <small>every sale, refund, stock count, price change, order, delivery and expense — read-only, can't be edited or deleted</small></h1>
+      <h1>History</h1>
       <div className="hs-bar">
         <select value={cat} onChange={(e) => { setCat(e.target.value); setPage(0); }}>
           <option value="">All events</option>
@@ -57,7 +57,7 @@ export function History({ tick }: { tick: number }) {
             <Fragment key={e.id}>
               <tr className="hs-row" onClick={() => setOpen(open === e.id ? null : e.id)}>
                 <td className="hs-when">{new Date(e.ts).toLocaleString()}</td>
-                <td className="hs-who">{e.actor === "system" ? <span className="hint" title="Recorded before logins existed">before login</span> : e.actor}{e.approved_by && <div className="hint" title="A manager or owner approved this with their PIN">approved by {e.approved_by}</div>}</td>
+                <td className="hs-who">{e.actor === "system" ? <span className="hint">before login</span> : e.actor}{e.approved_by && <div className="hint">approved by {e.approved_by}</div>}</td>
                 <td><span className={`hs-tag hs-${catOf(e.action)}`}>{label(catOf(e.action))}</span> <span className="hint">{verb(e.action)}</span></td>
                 <td>{e.summary}</td>
                 <td className="hs-more">{e.details != null ? (open === e.id ? "▾" : "▸") : ""}</td>

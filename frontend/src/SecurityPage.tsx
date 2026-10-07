@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useState } from "react";
+import QRCode from "qrcode";
 import type { FormEvent } from "react";
 import { req } from "./api";
 import { useAuth } from "./auth";
 import type { Role } from "./auth";
 
-interface UserRow { id: number; username: string; full_name: string; role: Role; active: boolean; must_change: boolean; last_login_ts: string | null; created_ts: string; locked: boolean; pin_locked: boolean; sessions: number }
-interface Rule { method: string; path: string; role: Role; pin: "self" | "approval" | null; label: string }
+interface UserRow { id: number; username: string; full_name: string; role: Role; active: boolean; last_login_ts: string | null; locked: boolean; pin_locked: boolean; sessions: number; two_factor: boolean }
+interface Rule { method: string; path: string; role: Role; pin: "self" | null; label: string }
 interface PolicyResp { rules: Rule[]; lockout: { password_tries: number; password_minutes: number; pin_tries: number; pin_minutes: number }; session_hours: number }
 type Note = { ok: boolean; text: string } | null;
 
@@ -17,83 +18,85 @@ function useGet<T>(fn: () => Promise<T>, deps: unknown[]) {   // fetch with a st
 const digits = (v: string) => v.replace(/\D/g, "");
 const when = (t: string | null) => (t ? new Date(t).toLocaleString() : "never");
 
-/** Owner only: people, roles, resets, and the permission table. */
+/** Owner only: people, PINs, passwords of other owners, and the permission table. */
 export function Security({ tick }: { tick: number }) {
-  const { me, withPin } = useAuth();
+  const { me } = useAuth();
   const [n, setN] = useState(0), [note, setNote] = useState<Note>(null);
   const users = useGet(() => req<{ users: UserRow[] }>("/users"), [tick, n]);
   const policy = useGet(() => req<PolicyResp>("/security/policy"), []);
-  const [f, setF] = useState({ username: "", full_name: "", role: "cashier" as Role, password: "", pin: "", must_change: true });
-  const [panel, setPanel] = useState<{ id: number; kind: "pw" | "pin" } | null>(null), [val, setVal] = useState(""), [panelMust, setPanelMust] = useState(true);
+  const [f, setF] = useState({ username: "", full_name: "", role: "employee" as "employee" | "owner", password: "", pin: "" });
+  const [panel, setPanel] = useState<{ id: number; kind: "pw" | "pin" | "edit" } | null>(null), [val, setVal] = useState(""), [ed, setEd] = useState({ username: "", full_name: "" });
 
-  /** one action: asks for the owner's PIN where the server requires it, shows the outcome */
-  const act = async (label: string, path: string, body: unknown, okText: string): Promise<boolean> => {
+  const act = async (path: string, body: unknown, okText: string): Promise<boolean> => {
     setNote(null);
-    try { await withPin(label, (a) => req(path, body, a)); setNote({ ok: true, text: okText }); setN((x) => x + 1); return true; }
-    catch (e) { const m = (e as Error).message; if (m) setNote({ ok: false, text: m }); return false; }
+    try { await req(path, body); setNote({ ok: true, text: okText }); setN((x) => x + 1); return true; }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); return false; }
   };
   const add = async (e: FormEvent) => {
     e.preventDefault();
-    if (await act("Add a person", "/users", { ...f, username: f.username.trim(), full_name: f.full_name.trim() }, f.must_change ? `Added ${f.username.trim()}. They must choose their own password the first time they log in.` : `Added ${f.username.trim()}. The password you typed is their password as it is.`))
-      setF({ username: "", full_name: "", role: "cashier", password: "", pin: "", must_change: true });
+    const body = { username: f.username.trim(), full_name: f.full_name.trim(), role: f.role, ...(f.role === "employee" ? { pin: f.pin } : { password: f.password }) };
+    if (await act("/users", body, f.role === "employee" ? `Added ${f.username.trim()}.` : `Added owner ${f.username.trim()}.`))
+      setF({ username: "", full_name: "", role: f.role, password: "", pin: "" });
   };
   const savePanel = async (u: UserRow) => {
     if (!panel) return;
-    const ok = panel.kind === "pw"
-      ? await act(`Reset password of ${u.username}`, `/users/${u.id}/password`, { new_password: val, must_change: panelMust },
-        panelMust ? `Password of ${u.username} reset. They must choose a new one at next login.` : `Password of ${u.username} reset. It is their password as it is.`)
-      : await act(`Reset PIN of ${u.username}`, `/users/${u.id}/pin`, { new_pin: val }, `PIN of ${u.username} reset.`);
+    const ok = panel.kind === "edit"
+      ? await act(`/users/${u.id}/update`, { username: ed.username.trim(), full_name: ed.full_name.trim() }, `${u.username} updated.`)
+      : panel.kind === "pw"
+        ? await act(`/users/${u.id}/password`, { new_password: val }, `Password of ${u.username} reset.`)
+        : await act(`/users/${u.id}/pin`, { new_pin: val }, `PIN of ${u.username} set.`);
     if (ok) { setPanel(null); setVal(""); }
   };
-  const rank: Role[] = ["cashier", "manager", "owner"];
-  const roleName: Record<Role, string> = { cashier: "Cashier — sells", manager: "Manager — also catalog, purchasing, expenses, reports, History", owner: "Owner — also people & security" };
+  const roles: Role[] = ["employee", "owner", "developer"];
+  const roleName: Record<string, string> = { guest: "Guest", employee: "Employee", owner: "Owner", developer: "Developer" };
 
   return (
     <div className="sx">
-      <h1>Security <small>people, roles, PINs — every action is recorded against a person</small></h1>
+      <h1>Security</h1>
       {note && <div className={note.ok ? "sx-ok" : "err"}>{note.text}</div>}
       {users.err && <div className="err">{users.err}</div>}
 
       <section>
         <h2>People</h2>
         <table>
-          <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Full name</th><th>Role</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead>
           <tbody>
             {(users.d?.users ?? []).map((u) => (
               <Fragment key={u.id}>
                 <tr className={u.active ? "" : "inactive"}>
                   <td><b>{u.username}</b>{u.id === me.id && <span className="hint"> (you)</span>}</td>
                   <td>{u.full_name || "—"}</td>
-                  <td>
-                    <select value={u.role} disabled={u.id === me.id || !u.active} title={u.id === me.id ? "You can't change your own role" : ""}
-                      onChange={(e) => void act(`Change role of ${u.username} to ${e.target.value}`, `/users/${u.id}/update`, { role: e.target.value }, `${u.username} is now a ${e.target.value}.`)}>
-                      {rank.map((r) => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                  </td>
+                  <td>{u.role}{u.role === "owner" && (u.two_factor ? <span className="good"> · 2FA</span> : <span className="hint"> · no 2FA</span>)}</td>
                   <td>
                     {!u.active && <b className="bad">DEACTIVATED </b>}{u.locked && <b className="bad">LOCKED </b>}{u.pin_locked && <b className="bad">PIN LOCKED </b>}
-                    {u.must_change && <span className="hint">must set password </span>}{u.active && !u.locked && !u.pin_locked && !u.must_change && <span className="good">active</span>}
-                    {u.sessions > 0 && <span className="hint"> · {u.sessions} login{u.sessions > 1 ? "s" : ""} open</span>}
+                    {u.active && !u.locked && !u.pin_locked && <span className="good">active</span>}
+                    {u.sessions > 0 && <span className="hint"> · {u.sessions} sign-in{u.sessions > 1 ? "s" : ""} open</span>}
                   </td>
                   <td className="hint">{when(u.last_login_ts)}</td>
                   <td>
-                    <button onClick={() => { setPanel(panel?.id === u.id && panel.kind === "pw" ? null : { id: u.id, kind: "pw" }); setVal(""); setPanelMust(true); }} disabled={u.id === me.id} title={u.id === me.id ? "Use Account to change your own" : ""}>Reset password</button>
-                    <button onClick={() => { setPanel(panel?.id === u.id && panel.kind === "pin" ? null : { id: u.id, kind: "pin" }); setVal(""); }}>Reset PIN</button>
-                    {(u.locked || u.pin_locked) && <button onClick={() => void act(`Unlock ${u.username}`, `/users/${u.id}/unlock`, {}, `${u.username} unlocked.`)}>Unlock</button>}
+                    <button onClick={() => { setPanel(panel?.id === u.id && panel.kind === "edit" ? null : { id: u.id, kind: "edit" }); setEd({ username: u.username, full_name: u.full_name }); }}>Edit</button>
+                    {u.role === "employee" && <button onClick={() => { setPanel(panel?.id === u.id && panel.kind === "pin" ? null : { id: u.id, kind: "pin" }); setVal(""); }}>Set PIN</button>}
+                    {u.role === "owner" && u.id !== me.id && <button onClick={() => { setPanel(panel?.id === u.id && panel.kind === "pw" ? null : { id: u.id, kind: "pw" }); setVal(""); }}>Reset password</button>}
+                    {(u.locked || u.pin_locked) && <button onClick={() => void act(`/users/${u.id}/unlock`, {}, `${u.username} unlocked.`)}>Unlock</button>}
                     {u.id !== me.id && (u.active
-                      ? <button onClick={() => window.confirm(`Deactivate ${u.username}? They are logged out at once and can't log in. Their History stays.`) && void act(`Deactivate ${u.username}`, `/users/${u.id}/active`, { active: false }, `${u.username} deactivated.`)}>Deactivate</button>
-                      : <button onClick={() => void act(`Reactivate ${u.username}`, `/users/${u.id}/active`, { active: true }, `${u.username} reactivated.`)}>Reactivate</button>)}
+                      ? <button onClick={() => window.confirm(`Deactivate ${u.username}?`) && void act(`/users/${u.id}/active`, { active: false }, `${u.username} deactivated.`)}>Deactivate</button>
+                      : <button onClick={() => void act(`/users/${u.id}/active`, { active: true }, `${u.username} reactivated.`)}>Reactivate</button>)}
+                    {u.role === "employee" && <button onClick={() => window.confirm(`Remove ${u.username}?`) && void act(`/users/${u.id}/remove`, {}, `${u.username} removed.`)}>Remove</button>}
                   </td>
                 </tr>
                 {panel?.id === u.id && (
                   <tr><td colSpan={6}>
                     <form className="sx-inline" onSubmit={(e) => { e.preventDefault(); void savePanel(u); }}>
-                      <input autoFocus type="password" autoComplete="new-password" value={val} maxLength={panel.kind === "pin" ? 8 : 200}
-                        inputMode={panel.kind === "pin" ? "numeric" : undefined}
+                      {panel.kind === "edit" ? <>
+                        <input autoFocus value={ed.username} placeholder="Username" autoComplete="off" onChange={(e) => setEd({ ...ed, username: e.target.value })} />
+                        <input value={ed.full_name} placeholder="Name" autoComplete="off" onChange={(e) => setEd({ ...ed, full_name: e.target.value })} />
+                        <button className="primary" disabled={!ed.username.trim()}>Save</button><button type="button" onClick={() => setPanel(null)}>Cancel</button>
+                      </> : <>
+                      <input autoFocus type="password" autoComplete="new-password" value={val} maxLength={panel.kind === "pin" ? 8 : 200} inputMode={panel.kind === "pin" ? "numeric" : undefined}
                         placeholder={panel.kind === "pw" ? `New password for ${u.username} (8+ characters)` : `New PIN for ${u.username} (4–8 digits)`}
                         onChange={(e) => setVal(panel.kind === "pin" ? digits(e.target.value) : e.target.value)} />
-                      {panel.kind === "pw" && <label className="sx-check"><input type="checkbox" checked={panelMust} onChange={(e) => setPanelMust(e.target.checked)} /> They must choose their own at next login</label>}
                       <button className="primary" disabled={!val}>Save</button><button type="button" onClick={() => setPanel(null)}>Cancel</button>
+                      </>}
                     </form>
                   </td></tr>
                 )}
@@ -106,81 +109,98 @@ export function Security({ tick }: { tick: number }) {
       <section>
         <h2>Add a person</h2>
         <form className="sx-add" onSubmit={(e) => void add(e)}>
-          <input value={f.username} placeholder="Username (letters/numbers)" autoComplete="off" onChange={(e) => setF({ ...f, username: e.target.value })} />
-          <input value={f.full_name} placeholder="Full name" onChange={(e) => setF({ ...f, full_name: e.target.value })} />
-          <select value={f.role} onChange={(e) => setF({ ...f, role: e.target.value as Role })}>{rank.map((r) => <option key={r} value={r}>{r}</option>)}</select>
-          <input type="password" autoComplete="new-password" value={f.password} placeholder={f.must_change ? "Starting password (8+)" : "Password (8+)"} onChange={(e) => setF({ ...f, password: e.target.value })} />
-          <input type="password" inputMode="numeric" maxLength={8} autoComplete="off" value={f.pin} placeholder="PIN (4–8 digits)" onChange={(e) => setF({ ...f, pin: digits(e.target.value) })} />
-          <button className="primary" disabled={!f.username.trim() || !f.password || !f.pin}>Add</button>
-          <label className="sx-check" style={{ flexBasis: "100%" }}><input type="checkbox" checked={f.must_change} onChange={(e) => setF({ ...f, must_change: e.target.checked })} /> They must choose their own password the first time they log in (recommended: only they will know it)</label>
+          <select value={f.role} onChange={(e) => setF({ ...f, role: e.target.value as "employee" | "owner" })}><option value="employee">Employee (PIN)</option><option value="owner">Owner (password)</option></select>
+          <input value={f.username} placeholder="Username" autoComplete="off" onChange={(e) => setF({ ...f, username: e.target.value })} />
+          <input value={f.full_name} placeholder="Name" onChange={(e) => setF({ ...f, full_name: e.target.value })} />
+          {f.role === "employee"
+            ? <input type="password" inputMode="numeric" maxLength={8} autoComplete="off" value={f.pin} placeholder="PIN (4–8 digits)" onChange={(e) => setF({ ...f, pin: digits(e.target.value) })} />
+            : <input type="password" autoComplete="new-password" value={f.password} placeholder="Password (8+)" onChange={(e) => setF({ ...f, password: e.target.value })} />}
+          <button className="primary" disabled={!f.username.trim() || (f.role === "employee" ? !f.pin : !f.password)}>Add</button>
         </form>
-        <p className="hint">Tick the box: the password you type is only a starting one, and they replace it at first login. Untick it: the password you type stays as their real password. Either way, tell them their PIN privately; they can change both under Account. Resetting a password logs that person out at once, and their old password stops working.</p>
       </section>
 
       <section>
         <h2>Who can do what</h2>
-        {policy.d && <p className="hint">
-          Sessions last {policy.d.session_hours} hours. {policy.d.lockout.password_tries} wrong passwords lock an account for {policy.d.lockout.password_minutes} minutes; {policy.d.lockout.pin_tries} wrong PINs lock that PIN for {policy.d.lockout.pin_minutes} minutes.
-          “PIN” = you type your own PIN. “Approval” = a manager/owner types their PIN (a cashier asks one to come and approve).
-        </p>}
-        {rank.map((r) => (
+        {roles.map((r) => (
           <details key={r}>
             <summary><b>{roleName[r]}</b></summary>
             <table><tbody>
               {(policy.d?.rules ?? []).filter((x) => x.role === r && x.path !== "/events").filter((x, i, a) => a.findIndex((y) => y.label === x.label) === i).map((x) => (
-                <tr key={x.method + x.path}><td>{x.label}</td><td>{x.pin === "self" ? <b>PIN</b> : x.pin === "approval" ? <b>PIN / approval</b> : <span className="hint">—</span>}</td></tr>
+                <tr key={x.method + x.path}><td>{x.label}</td><td>{x.pin === "self" ? <b>PIN</b> : <span className="hint">—</span>}</td></tr>
               ))}
             </tbody></table>
           </details>
         ))}
-        <p className="hint">Also needing a PIN when they happen: giving a discount code at checkout (approval) and changing a product's price or cost (PIN).</p>
       </section>
     </div>
   );
 }
 
-/** Everyone: change my own password and PIN. */
+/** Everyone: lock now, sign out. Owners: password and two-step sign-in. */
 export function Account() {
-  const { me, logout } = useAuth();
-  const [pw, setPw] = useState({ cur: "", n1: "", n2: "" }), [pn, setPn] = useState({ cur: "", n1: "", n2: "" });
-  const [a, setA] = useState<Note>(null), [b, setB] = useState<Note>(null);
+  const { me, logout, lock } = useAuth();
+  const isOwner = me.role === "owner" || me.role === "developer";
+  const [pw, setPw] = useState({ cur: "", n1: "", n2: "" }), [a, setA] = useState<Note>(null);
+  const [tf, setTf] = useState<{ secret: string; uri: string } | null>(null), [code, setCode] = useState(""), [codes, setCodes] = useState<string[] | null>(null), [b, setB] = useState<Note>(null);
+  const [off, setOff] = useState({ pw: "", code: "" }), [on2fa, setOn2fa] = useState(me.two_factor), [qr, setQr] = useState("");
+  useEffect(() => { if (!tf) { setQr(""); return; } let on = true; void QRCode.toDataURL(tf.uri, { margin: 1, width: 200 }).then((u) => { if (on) setQr(u); }).catch(() => {}); return () => { on = false; }; }, [tf]);
   const savePw = async (e: FormEvent) => {
     e.preventDefault(); setA(null);
     if (pw.n1 !== pw.n2) return setA({ ok: false, text: "The two new passwords don't match." });
-    try { await req("/auth/password", { current_password: pw.cur, new_password: pw.n1 }); setA({ ok: true, text: "Password changed. Your other logins (other tills/browsers) were logged out." }); setPw({ cur: "", n1: "", n2: "" }); }
+    try { await req("/auth/password", { current_password: pw.cur, new_password: pw.n1 }); setA({ ok: true, text: "Password changed." }); setPw({ cur: "", n1: "", n2: "" }); }
     catch (x) { setA({ ok: false, text: (x as Error).message }); }
   };
-  const savePin = async (e: FormEvent) => {
+  const begin = async () => { setB(null); try { setTf(await req("/auth/2fa/begin", {})); } catch (x) { setB({ ok: false, text: (x as Error).message }); } };
+  const confirm = async (e: FormEvent) => {
     e.preventDefault(); setB(null);
-    if (pn.n1 !== pn.n2) return setB({ ok: false, text: "The two new PINs don't match." });
-    try { await req("/auth/pin", { current_password: pn.cur, new_pin: pn.n1 }); setB({ ok: true, text: "PIN changed." }); setPn({ cur: "", n1: "", n2: "" }); }
+    try { const r = await req<{ recovery_codes: string[] }>("/auth/2fa/confirm", { code: code.trim() }); setCodes(r.recovery_codes); setTf(null); setCode(""); setOn2fa(true); }
+    catch (x) { setB({ ok: false, text: (x as Error).message }); }
+  };
+  const disable = async (e: FormEvent) => {
+    e.preventDefault(); setB(null);
+    try { await req("/auth/2fa/disable", { password: off.pw, code: off.code.trim() }); setOn2fa(false); setCodes(null); setOff({ pw: "", code: "" }); setB({ ok: true, text: "Two-step sign-in is off." }); }
     catch (x) { setB({ ok: false, text: (x as Error).message }); }
   };
   return (
     <div className="sx">
       <h1>Account <small>{me.full_name || me.username} · {me.role}</small></h1>
       <section>
-        <h2>Change my password</h2>
-        <form className="sx-stack" onSubmit={(e) => void savePw(e)}>
-          <input type="password" autoComplete="current-password" value={pw.cur} placeholder="Current password" onChange={(e) => setPw({ ...pw, cur: e.target.value })} />
-          <input type="password" autoComplete="new-password" value={pw.n1} placeholder="New password (8+ characters)" onChange={(e) => setPw({ ...pw, n1: e.target.value })} />
-          <input type="password" autoComplete="new-password" value={pw.n2} placeholder="New password again" onChange={(e) => setPw({ ...pw, n2: e.target.value })} />
-          {a && <div className={a.ok ? "sx-ok" : "err"}>{a.text}</div>}
-          <button className="primary" disabled={!pw.cur || !pw.n1}>Change password</button>
-        </form>
+        <button onClick={lock}>Lock screen now</button><button onClick={() => void logout()}>Sign out</button>
       </section>
-      <section>
-        <h2>Change my PIN</h2>
-        <form className="sx-stack" onSubmit={(e) => void savePin(e)}>
-          <p className="hint">Your PIN is what you type to confirm refunds, stock counts, price changes and receiving stock. Don't share it. Changing it needs your password.</p>
-          <input type="password" autoComplete="current-password" value={pn.cur} placeholder="Your password" onChange={(e) => setPn({ ...pn, cur: e.target.value })} />
-          <input type="password" inputMode="numeric" maxLength={8} autoComplete="off" value={pn.n1} placeholder="New PIN (4–8 digits)" onChange={(e) => setPn({ ...pn, n1: digits(e.target.value) })} />
-          <input type="password" inputMode="numeric" maxLength={8} autoComplete="off" value={pn.n2} placeholder="New PIN again" onChange={(e) => setPn({ ...pn, n2: digits(e.target.value) })} />
+      {isOwner && <>
+        <section>
+          <h2>Change my password</h2>
+          <form className="sx-stack" onSubmit={(e) => void savePw(e)}>
+            <input type="password" autoComplete="current-password" value={pw.cur} placeholder="Current password" onChange={(e) => setPw({ ...pw, cur: e.target.value })} />
+            <input type="password" autoComplete="new-password" value={pw.n1} placeholder="New password" onChange={(e) => setPw({ ...pw, n1: e.target.value })} />
+            <input type="password" autoComplete="new-password" value={pw.n2} placeholder="New password again" onChange={(e) => setPw({ ...pw, n2: e.target.value })} />
+            {a && <div className={a.ok ? "sx-ok" : "err"}>{a.text}</div>}
+            <button className="primary" disabled={!pw.cur || !pw.n1}>Change password</button>
+          </form>
+        </section>
+        <section>
+          <h2>Two-step sign-in (authenticator app) <small>{on2fa ? <b className="good">ON</b> : <b className="bad">OFF</b>}</small></h2>
           {b && <div className={b.ok ? "sx-ok" : "err"}>{b.text}</div>}
-          <button className="primary" disabled={!pn.cur || !pn.n1}>Change PIN</button>
-        </form>
-      </section>
-      <section><button onClick={() => void logout()}>Log out</button></section>
+          {!on2fa && !tf && <button className="primary" onClick={() => void begin()}>Set up two-step sign-in</button>}
+          {tf && (
+            <form className="sx-stack" onSubmit={(e) => void confirm(e)}>
+              {qr && <img src={qr} width={200} height={200} alt="Setup QR code for your authenticator app" />}
+              <p><code>{tf.secret}</code></p>
+              <p><a href={tf.uri}>Setup link</a></p>
+              <input value={code} inputMode="numeric" maxLength={6} placeholder="6-digit code" onChange={(e) => setCode(digits(e.target.value))} />
+              <button className="primary" disabled={code.length !== 6}>Turn on</button>
+            </form>
+          )}
+          {codes && <div><p><b>Recovery codes (shown once)</b></p><div className="sx-codes">{codes.map((c) => <div key={c}>{c}</div>)}</div></div>}
+          {on2fa && me.role === "owner" && !codes && (
+            <form className="sx-stack" onSubmit={(e) => void disable(e)}>
+              <input type="password" value={off.pw} placeholder="Password" onChange={(e) => setOff({ ...off, pw: e.target.value })} />
+              <input value={off.code} placeholder="Code" onChange={(e) => setOff({ ...off, code: e.target.value })} />
+              <button disabled={!off.pw || !off.code}>Switch off</button>
+            </form>
+          )}
+        </section>
+      </>}
     </div>
   );
 }

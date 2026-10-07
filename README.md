@@ -6,6 +6,8 @@ The system is designed around one central idea: **sales, stock, purchasing, refu
 
 It runs locally and uses a **React + TypeScript** frontend, a **Python + FastAPI** backend, and **PostgreSQL** for persistent data.
 
+> **Status: Prototype v1.0 (pilot / MVP).** The logic, security model and data model are complete for the pilot in the mart. The interface is being finished separately, so screens are functional first. A fresh installation has no people: the first screen creates the owner.
+
 ---
 
 ## Product Overview
@@ -79,7 +81,7 @@ It supports:
 - Immutable barcode/SKU
 - Product price history
 
-Price changes are treated as controlled actions and can require manager/owner approval depending on the user's role.
+Price and cost changes are controlled actions: the owner needs no extra step; an employee-level login cannot reach the Catalog at all.
 
 ### 🚚 Purchasing & Stock Receiving
 
@@ -144,7 +146,7 @@ History can be filtered by:
 - Text
 - Date
 
-The audit information identifies the person who performed the action and, where approval was required, the approving user as well.
+The audit information identifies the person who performed the action.
 
 The history and stock ledgers are designed to be **append-only**, which helps preserve an operational record rather than allowing business events to simply disappear.
 
@@ -152,61 +154,28 @@ The history and stock ledgers are designed to be **append-only**, which helps pr
 
 ## User Roles & Access Control
 
-The system has three application roles:
+| Role | Signs in with | Can do |
+|---|---|---|
+| **Employee** | Name tile + own PIN (no password) | Selling, products/stock visibility, invoices, stock ledger, own cash-up shift. Refunds, discount codes and stock counts need the employee's **own PIN**. |
+| **Owner** (managers count as owners) | One password, plus 2FA once switched on | Everything: Catalog, Purchasing, Expenses, Reports, History, people (add, rename, remove employees) & PINs, Settings, Network, Cash up reports. Needs no PIN for actions: the password (and 2FA) at sign-in already proved who they are. |
+| **Developer** | Separate password + mandatory 2FA, created only from the command line | Everything, plus the network-protection override and diagnostics. Never listed or editable in the app. |
+| **Guest** | Nothing | Read-only demo (Dashboard, Inventory). Off unless the owner switches it on in Settings; ends after 15 minutes. |
 
-| Role | Access |
-|---|---|
-| **Cashier** | Selling, products/stock visibility, invoices, stock movements and own account |
-| **Manager** | Cashier capabilities plus Catalog, Purchasing, Suppliers, Expenses, Reports and History |
-| **Owner** | Manager capabilities plus user management and Security |
-
-The interface hides sections a role cannot use, while the backend enforces the same permissions.
-
-This means access control is not dependent only on what is visible in the frontend.
-
-### Manager Approval
-
-Sensitive actions can require a manager or owner to approve the action directly from the cashier's screen.
-
-Approval can be required for actions such as:
-
-- Refunds
-- Stock adjustments
-- Discount codes
-- Product price/cost changes
-- Receiving stock
-- Purchase-order cancellation/closing
-- Marking purchases as paid
-- Voiding expenses
-- User-management operations
-
-The approval is recorded in History so both the acting user and approving user remain identifiable.
-
----
+Only an owner can add people, rename them (name and username), remove an employee, set or change an employee's PIN, reset another owner's password, or unlock a locked account. A removed employee can no longer sign in; their past sales and History keep the name they had at the time.
+Every permission lives in one table (`backend/policy.py`); the server refuses to start if a route has no rule.
 
 ## Authentication & Security
 
-The application provides individual user accounts instead of a shared POS login.
+- **Ordered request pipeline** (`backend/pipeline.py`): network gate → identity → lock → permission → PIN → action → record. Safety checks always run first.
+- **1-minute inactivity lock**: the screen is covered and the server refuses everything until the same person signs in again (employee: PIN, owner: password). The sale is not touched. The server also locks by itself if it hears nothing for 80 seconds.
+- **2FA** for owners (authenticator app, 8 one-time recovery codes); mandatory for the developer. Recovery: `python manage_users.py reset-2fa NAME` on the POS computer.
+- **Network protection**: only this computer and the shop's private network may connect; the owner can pin the POS to one approved connection in Settings → Network. A critical alert appears if that connection goes down.
+- **Critical alerts** need an explicit acknowledgement (who and when are recorded) and stay until the problem is fixed.
+- **Cash drawer** opens only for a saved cash sale or a recorded manual opening; **cash-up** makes the employee count before the system works out the expected amount.
+- **Card-machine credentials** are write-only: stored sealed, never sent to the screen or written to logs.
+- **History is append-only** (database triggers and, with `secure_db.py`, permissions).
+- Passwords and PINs are salted `scrypt` hashes; PINs also use a secret key kept outside the database (`backend/pos_secret.key`: back it up separately).
 
-Security functionality includes:
-
-- Username/password authentication
-- Personal PINs
-- Role-based permissions
-- Sensitive-action approval
-- Account lockouts
-- PIN lockouts
-- Session expiration
-- Owner-controlled user management
-- Account unlocking
-- Password/PIN reset support
-- Central permission policy for API routes
-
-The permission policy is centralized in the backend. The application checks that every route has a permission rule and refuses to start if the policy is incomplete.
-
-PINs are not stored as plain text. They use a salted `scrypt` derivation with a secret key.
-
----
 
 ## How the System Works
 
@@ -275,7 +244,7 @@ Existing Invoice
       ↓
 Select item/quantity to refund
       ↓
-Approval when required
+Employee's own PIN when required
       ↓
 Refund recorded
       ↓
@@ -403,6 +372,26 @@ The following screenshots show the current application flow and major areas of t
 |---|---|
 | ![History](docs/screenshots/25-history-audit-log.png) | ![Security](docs/screenshots/26-security.png) |
 
+### Cash, Reports & Settings
+
+| Cash Up | End of Day |
+|---|---|
+| ![Cash up](docs/screenshots/Screenshot%202026-10-06%20141147.png) | ![End of day](docs/screenshots/Screenshot%202026-10-06%20141202.png) |
+
+| Profit | Settings |
+|---|---|
+| ![Profit](docs/screenshots/Screenshot%202026-10-06%20141208.png) | ![Settings](docs/screenshots/Screenshot%202026-10-06%20141217.png) |
+
+| Network & Card Machine | Receipt Print |
+|---|---|
+| ![Network and card machine](docs/screenshots/Screenshot%202026-10-06%20141222.png) | ![Receipt](docs/screenshots/Screenshot%202026-10-06%20141125.png) |
+
+| Invoices | People & Security |
+|---|---|
+| ![Invoices](docs/screenshots/Screenshot%202026-10-06%20141318.png) | ![People and security](docs/screenshots/Screenshot%202026-10-06%20141233.png) |
+
+Names shown in the screenshots are test data.
+
 ---
 
 ## Technology Stack
@@ -437,7 +426,9 @@ The project includes backend test suites covering:
 - Concurrency
 - Authentication
 - Roles and permissions
-- PIN approval
+- Own-PIN confirmations
+- Scanner and card-sale check with dummy values (`backend/tests/check_scan_and_card.py`)
+- People management: rename and remove (`backend/tests/test_people.py`)
 - Lockouts
 - Sessions
 - CORS
@@ -481,9 +472,9 @@ Asia/Karachi
 
 ### First Run
 
-On the first launch, the application provides a first-time setup flow to create the initial owner account.
+On the first launch there are no people at all: the application shows a first-time setup screen to create the owner account (username and password).
 
-After that, the owner can create the required manager and cashier accounts through the Security section.
+After that, the owner adds employees (name + PIN) and, if wanted, other owners (password) through the Security section, and switches on 2FA under Account.
 
 ---
 
@@ -524,7 +515,7 @@ The backend exposes REST-style API routes grouped by business area.
 | Area | Examples |
 |---|---|
 | Authentication | `/auth/status`, `/auth/setup`, `/auth/login`, `/auth/logout` |
-| Users & Security | `/users`, `/users/{id}/update`, `/security/policy` |
+| Users & Security | `/users`, `/users/{id}/update`, `/users/{id}/remove`, `/security/policy` |
 | Selling | `/inventory`, `/scan`, `/cart`, `/checkout`, `/sales`, `/movements` |
 | Catalog | `/catalog/meta`, `/catalog/products`, `/catalog/products/{id}/update` |
 | Purchasing | `/suppliers`, `/purchase-orders`, `/purchases`, `/expenses`, `/reports/purchases` |
@@ -586,7 +577,9 @@ The current implementation provides an end-to-end retail workflow covering:
 - Expenses
 - Business reports
 - User roles and permissions
-- Manager approval
+- Employee own-PIN confirmations
+- People management for the owner (add, rename, remove employees)
+- Cash drawer, cash-up, end-of-day and profit reports
 - Authentication and security controls
 - Audit/history tracking
 - PostgreSQL persistence
@@ -602,11 +595,10 @@ The screenshots above represent the current application interface and workflow.
 
 The application is currently designed for **local operation**. The existing implementation also documents several operational boundaries, including:
 
-- HTTP is used locally rather than HTTPS.
+- HTTPS is optional (self-signed certificate via `make_cert.py`); plain HTTP is the default for local use.
 - The application uses a single backend process because live-update state is maintained in-process.
-- Weighed products currently rely on manually entered quantities rather than a hardware scale integration.
+- Weighed products accept typed weights or price-computing scale labels; there is no direct link to scale hardware.
 - There is one global cart rather than separate carts per till.
-- Some store-level settings remain fixed in the current implementation.
 - Real-world hardware such as barcode scanners, weighing scales and networked tills requires hardware-specific testing before deployment.
 
 These are implementation boundaries of the current version rather than gaps in the core POS workflow.
@@ -618,3 +610,9 @@ These are implementation boundaries of the current version rather than gaps in t
 This project provides a complete local POS workflow in which **selling, inventory, purchasing, refunds, expenses, reporting, security and audit history work together around the same underlying data model**.
 
 The result is a system where a retail transaction is not isolated: the sale affects stock, the stock change is recorded, the invoice remains available for review, refunds can restore inventory, purchasing can replenish stock, reports summarize activity, and History provides an audit trail of who performed and approved important actions.
+
+
+## Recent additions
+See `CHANGES-v12.md`. Quick start for HTTPS: in `backend\` run `python -m pip install cryptography` then `python make_cert.py --host <this computer's shop-network address>`, then double-click `start.bat` again and open `https://localhost:5173` (accept the one-time browser warning).
+Other tills: set `POS_BIND_HOST=0.0.0.0` in `backend\.env`, allow ports 8000 and 5173 in the firewall, and use HTTPS first.
+CSV import columns: `barcode,name,category,unit,price,cost` (unit pc / kg / l).

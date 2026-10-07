@@ -8,13 +8,13 @@ assert OWNER_URL.split("?")[0].rstrip("/").endswith("_test"), "POS_TEST_DATABASE
 ADMIN_URL = os.environ.get("POS_TEST_ADMIN_URL", "postgresql://postgres:pg@localhost:5432/pos_test")
 
 if len(sys.argv) > 1 and sys.argv[1] == "flow":                      # ── child process: the POS running as pos_app ──
-    os.environ["POS_SECRET_KEY"] = "test-secret-key"; os.environ["POS_ALLOW_REMOTE_SETUP"] = "1"
+    os.environ["POS_SECRET_KEY"] = "test-secret-key"; os.environ["POS_ALLOW_REMOTE_SETUP"] = "1"; os.environ["POS_TEST_MODE"] = "1"
     from fastapi.testclient import TestClient
     import main
     c = TestClient(main.app); c.headers["X-POS"] = "1"
     def ok(r, code=200): assert r.status_code == code, (r.status_code, r.text); return r.json()
     assert main.db.execute("SELECT current_user").fetchone()[0] == "pos_app"
-    ok(c.post("/auth/setup", json={"username": "boss", "password": "Boss-pass-1", "pin": "4829"})); c.headers["X-POS-PIN"] = "4829"
+    ok(c.post("/auth/setup", json={"username": "boss", "password": "Boss-pass-1"}))
     ok(c.post("/scan", json={"sku": "8964001", "qty": 2})); sid = ok(c.post("/checkout", json={"payment_method": "Cash", "discount_code": "SAVE10"}))["receipt"]["id"]
     ok(c.post(f"/sales/{sid}/refund", json={"note": "t", "items": [{"id": 1, "qty": 1}]})); ok(c.post(f"/sales/{sid}/refund", json={"note": "t"}))
     ok(c.post("/inventory/adjust", json={"sku": "8964001", "new_stock": 33}))
@@ -23,8 +23,15 @@ if len(sys.argv) > 1 and sys.argv[1] == "flow":                      # ── ch
     s = ok(c.post("/suppliers", json={"name": "S1"}))["id"]; po = ok(c.post("/purchase-orders", json={"supplier_id": s, "lines": [{"product_id": new["id"], "qty": 5, "unit_cost": 30}]}))
     it = ok(c.get(f"/purchase-orders/{po['id']}"))["items"][0]["id"]; ok(c.post(f"/purchase-orders/{po['id']}/receive", json={"lines": [{"po_item_id": it, "qty": 5}], "paid": True, "pay_method": "Cash"}))
     e = ok(c.post("/expenses", json={"category": "Rent", "amount": 10}))["id"]; ok(c.post(f"/expenses/{e}/void", json={"reason": "x"}))
-    ok(c.post("/users", json={"username": "sara", "role": "cashier", "password": "Sara-temp-12", "pin": "2864"}))
-    n = TestClient(main.app); n.headers["X-POS"] = "1"; ok(n.post("/auth/login", json={"username": "sara", "password": "Sara-temp-12"})); ok(n.post("/auth/logout", json={}))
+    ok(c.post("/users", json={"username": "sara", "role": "employee", "pin": "2864"}))
+    n = TestClient(main.app); n.headers["X-POS"] = "1"; ok(n.post("/auth/pin-login", json={"username": "sara", "pin": "2864"})); ok(n.post("/scan", json={"sku": "8964003", "qty": 1})); ok(n.post("/cart/clear")); ok(n.post("/auth/lock", json={})); ok(n.post("/auth/unlock", json={"pin": "2864"})); ok(n.post("/auth/logout", json={}))
+    ok(c.post("/settings", json={"key": "require_shift", "value": True})); ok(c.post("/shifts/open", json={"opening_float": 10})); ok(c.post("/shifts/close", json={"counted_cash": 10}))
+    ok(c.post("/shifts/open", json={"opening_float": 100})); ok(c.post("/shifts/move", json={"kind": "drop", "amount": 20, "reason": "to the safe"})); ok(c.post("/shifts/close", json={"counted_cash": 80}))
+    ok(c.get("/shifts/moves")); ok(c.get("/reports/day")); ok(c.get("/reports/profit")); ok(c.get("/catalog/next-barcode"))
+    ok(c.post("/catalog/import", json={"rows": [{"sku": "7001", "name": "Imported", "price": 10}], "dry_run": False}))
+    ok(c.post("/settings", json={"key": "discount_codes", "value": {"ABC": 5}}))
+    ok(c.post("/drawer/open", json={"reason": "test"})); ok(c.get("/alerts")); ok(c.get("/network")); import alerts; alerts.monitor_once()
+    ok(c.post("/integrations/card/credentials", json={"merchant_id": "M1", "api_key": "K1"}))
     ok(c.get("/history?limit=5")); ok(c.get("/reports/purchases")); ok(c.get("/dashboard"))
     print("flow ok"); sys.exit(0)
 
@@ -34,7 +41,7 @@ with psycopg.connect(OWNER_URL, autocommit=True) as _c:
     _c.execute("DROP SCHEMA public CASCADE"); _c.execute("CREATE SCHEMA public"); _c.execute("DROP ROLE IF EXISTS pos_app") if False else None
 app_url = secure_db.harden(ADMIN_URL, "pos_app", "app-test-password-123")
 assert secure_db.prove(app_url) == [], secure_db.prove(app_url)
-base_env = {k: v for k, v in os.environ.items() if k != "DATABASE_ADMIN_URL"}
+base_env = {**{k: v for k, v in os.environ.items() if k != "DATABASE_ADMIN_URL"}, "POS_TEST_MODE": "1"}
 env = {**base_env, "DATABASE_URL": app_url}
 def run(*args, e=env, **kw): return subprocess.run([sys.executable, *args], cwd=BACK, env=e, capture_output=True, text=True, **kw)
 
