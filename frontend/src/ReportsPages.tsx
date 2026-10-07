@@ -37,7 +37,6 @@ export function DayReport({ tick }: { tick: number }) {
           <table><thead><tr><th>#</th><th>Employee</th><th>Float</th><th>Counted</th><th>Expected</th><th>Difference</th></tr></thead>
             <tbody>{d.shifts.map((s) => <tr key={s.id}><td>{s.id}</td><td>{s.actor}</td><td>{rs(s.opening_float)}</td><td>{rs(s.counted_cash)}</td><td>{rs(s.expected_cash)}</td><td><b className={s.variance < 0 ? "bad" : ""}>{rs(s.variance)}</b></td></tr>)}
               <tr><td></td><td><b>Total</b></td><td></td><td><b>{rs(d.counted_total)}</b></td><td><b>{rs(d.expected_total)}</b></td><td><b>{rs(d.variance_total)}</b></td></tr></tbody></table>
-          <p className="hint">Cash taken out to the safe: {rs(d.moves.drop?.total ?? 0)} · paid out: {rs(d.moves.payout?.total ?? 0)} · added: {rs(d.moves.add?.total ?? 0)} · drawer opened by hand: {d.manual_drawer_opens} time(s).</p>
         </section>
       </>}
     </div>
@@ -69,7 +68,6 @@ export function ProfitReport({ tick }: { tick: number }) {
             <tr><td>Stock on the shelves</td><td>{rs(d.stock_value_at_cost)} at cost · {rs(d.stock_value_at_price)} at selling price</td></tr>
           </tbody></table>
           {d.lines_without_cost > 0 && <div className="err">{d.lines_without_cost} sold line(s) have no cost set, so their profit is overstated. Set the cost in Catalog (or receive stock through a purchase order).</div>}
-          {d.estimated_cost_lines > 0 && <p className="hint">{d.estimated_cost_lines} older sale line(s) were made before costs were recorded, so today's cost was used for them.</p>}
         </section>
         <section>
           <h2>Best items by profit</h2>

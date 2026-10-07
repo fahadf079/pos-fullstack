@@ -527,7 +527,6 @@ export function Reports({ tick }: { tick: number }) {
             <Kpi label="Owed to suppliers" value={rs(rep.unpaid_to_suppliers)} sub="all unpaid deliveries" />
             <Kpi label="Open orders" value={rs(rep.open_po_value)} sub={`${rep.open_po_count} POs awaiting delivery`} />
           </div>
-          <p className="pm-hint">Cash-flow view is not profit: stock bought but not yet sold counts against it. Profit needs cost-of-goods per sale, which can be added later since product cost is now recorded on every receipt.</p>
 
           <div className="pm-two">
             <div>
