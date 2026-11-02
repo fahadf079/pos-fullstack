@@ -2,7 +2,7 @@
 cardvault.py — card-machine credentials: stored sealed, written once, NEVER sent back.
 
   * The screen only ever sees a REFERENCE ("card-terminal") and whether it is configured, plus who/when. The secret
-    itself is accepted by one write-only endpoint, sealed (hashing.seal) and kept in the `vault` table.
+    itself is accepted by one write-only endpoint, sealed with AES-256-GCM (hashing.seal) and kept in the `vault` table.
   * The only way to read it is `use("card-terminal")`, a Python function for the server-side terminal driver. No API
     route calls it. The History records "credentials updated" without any value, and request bodies are never logged.
   * Real terminal integration is NOT built here (it depends on the machine's vendor); this is the safe place to plug it in.
@@ -27,7 +27,7 @@ def use(ref: str = CARD_REF) -> dict:
         r = db.execute("SELECT sealed FROM vault WHERE ref=?", (ref,)).fetchone()
     if not r:
         raise RuntimeError("Card machine credentials are not set.")
-    return json.loads(hashing.unseal(r["sealed"]))
+    return json.loads(hashing.unseal(r["sealed"], ref))
 
 
 class CredsIn(BaseModel):
@@ -52,7 +52,7 @@ def card_set(b: CredsIn):
                "terminal_id": b.terminal_id.get_secret_value() if b.terminal_id else ""}
     with transaction():
         db.execute("INSERT INTO vault(ref, sealed, updated_by) VALUES (?,?,?) ON CONFLICT(ref) DO UPDATE SET sealed=EXCLUDED.sealed, updated_ts=now(), updated_by=EXCLUDED.updated_by",
-                   (CARD_REF, hashing.seal(json.dumps(payload)), me["username"]))
+                   (CARD_REF, hashing.seal(json.dumps(payload), CARD_REF), me["username"]))
         audit("integration.card_credentials_set", "integration", CARD_REF, "Card machine credentials were stored (values are never shown or logged)")
     return {"ok": True, "ref": CARD_REF}
 

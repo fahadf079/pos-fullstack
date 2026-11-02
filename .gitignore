@@ -1,6 +1,12 @@
 backend/.env
+backend/.env.*
+!backend/.env.example
 backend/.env.bak
 backend/pos_secret.key
+backend/certs/
+*.pem
+*.key
+*.dump
 backups/
 __pycache__/
 frontend/node_modules/

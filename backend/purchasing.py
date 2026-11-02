@@ -16,9 +16,10 @@ from typing import List, Optional
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import database
+import hashing
 from database import audit, now as _now, tx, transaction
 
 router = APIRouter()
@@ -132,12 +133,22 @@ class SupplierIn(BaseModel):
     phone: str = Field(default="", max_length=40)
     note: str = Field(default="", max_length=300)
 
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
+
 
 class SupplierPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=80)
     phone: Optional[str] = Field(default=None, max_length=40)
     note: Optional[str] = Field(default=None, max_length=300)
     active: Optional[bool] = None
+
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
 
 
 class POLine(BaseModel):
@@ -157,6 +168,11 @@ class POIn(BaseModel):
     note: str = Field(default="", max_length=300)
     lines: List[POLine] = Field(min_length=1, max_length=200)
 
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
+
 
 class RecvLine(BaseModel):
     po_item_id: int
@@ -171,6 +187,11 @@ class ReceiveIn(BaseModel):
     pay_method: str = Field(default="", max_length=20)
     note: str = Field(default="", max_length=300)
 
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
+
 
 class PayIn(BaseModel):
     pay_method: str = Field(default="Cash", max_length=20)
@@ -182,6 +203,11 @@ class ExpenseIn(BaseModel):
     payee: str = Field(default="", max_length=80)
     note: str = Field(default="", max_length=300)
     date: Optional[str] = None   # YYYY-MM-DD, defaults to today
+
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
 
 
 # ───────────────────────────── products list for the pickers ─────────────────────────────
@@ -511,6 +537,11 @@ def add_expense(b: ExpenseIn):
 
 class VoidIn(BaseModel):
     reason: str = Field(default="", max_length=200)
+
+    @field_validator("reason")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
 
 
 @router.post("/expenses/{eid}/void")

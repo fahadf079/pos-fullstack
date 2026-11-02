@@ -559,6 +559,12 @@ CREATE TABLE IF NOT EXISTS vault(
   updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by TEXT NOT NULL DEFAULT 'system'
 );
+CREATE TABLE IF NOT EXISTS key_escrow(
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  salt TEXT NOT NULL,
+  wrapped TEXT NOT NULL,
+  created_ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE OR REPLACE FUNCTION pos_append_only() RETURNS trigger AS $fn$
 BEGIN
@@ -575,7 +581,7 @@ APPEND_ONLY = ("audit_log", "movements", "product_log", "drawer_events", "shift_
 # change table structure, drop anything or switch off the append-only triggers: only the owner can.
 _RW = ("products", "sales", "refunds", "suppliers", "purchase_orders", "po_items", "receipts", "receipt_items", "expenses", "users",
        "settings", "alerts", "shifts")
-_FULL = ("cart", "sessions", "vault")
+_FULL = ("cart", "sessions", "vault", "key_escrow")
 _APPEND = ("movements", "audit_log", "product_log", "drawer_events", "shift_moves")
 
 
@@ -620,7 +626,7 @@ def _ddl(c) -> None:
 
 def _schema_current() -> bool:
     """True when every table/column this version needs exists (the restricted login can't create them)."""
-    tables = ("users", "sessions", "settings", "alerts", "shifts", "drawer_events", "shift_moves", "vault")
+    tables = ("users", "sessions", "settings", "alerts", "shifts", "drawer_events", "shift_moves", "vault", "key_escrow")
     cols = (("audit_log", "approved_by"), ("movements", "actor"), ("users", "totp_enabled"), ("users", "removed"), ("sessions", "locked"), ("refunds", "actor"), ("refunds", "paid_via"))
     n = db.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(?)", (list(tables),)).fetchone()[0]
     m = sum(db.execute("SELECT count(*) FROM information_schema.columns WHERE table_name=? AND column_name=?", (t, c)).fetchone()[0] for t, c in cols)

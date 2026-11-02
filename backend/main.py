@@ -7,9 +7,9 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import os
-import context, database, catalog, purchasing, history, auth, users, settings, alerts, netpolicy, pipeline, policy, credentials, cash, cardvault, profit
+import hashing, context, database, catalog, purchasing, history, auth, users, settings, alerts, netpolicy, pipeline, policy, credentials, cash, cardvault, profit
 from contextlib import asynccontextmanager
 from database import db, tx, audit, jl, now, bump, transaction
 
@@ -105,6 +105,28 @@ ORIGIN_RE = os.environ.get("POS_CORS_ORIGIN_REGEX", r"^https?://(localhost|127\.
 app.add_middleware(CORSMiddleware, allow_origin_regex=ORIGIN_RE, allow_credentials=True, allow_methods=["GET", "POST"],
                    allow_headers=["Content-Type", "X-POS", "X-POS-PIN"])
 
+
+# Safety headers on every answer: nothing may be cached (receipts, takings, names), nothing may be sniffed, framed or
+# opened as a page. Plain ASGI middleware so the live-updates stream (/events) is not buffered or broken.
+_HTTPS_ONLY = os.environ.get("POS_COOKIE_SECURE") == "1"
+class SecurityHeaders:
+    def __init__(self, app): self.app = app
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http": return await self.app(scope, receive, send)
+        async def wrapped(msg):
+            if msg["type"] == "http.response.start":
+                h = {k.lower(): (k, v) for k, v in msg.get("headers", [])}
+                def put(name: bytes, val: bytes, keep: bool = False):
+                    if not (keep and name in h): h[name] = (name, val)
+                put(b"cache-control", b"no-store"); put(b"x-content-type-options", b"nosniff"); put(b"x-frame-options", b"DENY")
+                put(b"referrer-policy", b"no-referrer"); put(b"content-security-policy", b"default-src 'none'; frame-ancestors 'none'")
+                put(b"cross-origin-resource-policy", b"same-site")
+                if _HTTPS_ONLY: put(b"strict-transport-security", b"max-age=31536000")
+                msg["headers"] = list(h.values())
+            await send(msg)
+        await self.app(scope, receive, wrapped)
+app.add_middleware(SecurityHeaders)
+
 catalog.setup(bump)
 purchasing.setup(move, bump)
 app.include_router(catalog.router)
@@ -116,10 +138,18 @@ for r_ in (auth.router, users.router, settings.router, alerts.router, netpolicy.
 class Scan(BaseModel): sku: str; qty: float = Field(1, gt=0, le=10000)          # qty<=0 used to ADD stock via /scan; decimals only for kg / l items
 class Remove(BaseModel): product_id: int; qty: float = Field(1, gt=0, le=10000)
 class CartSet(BaseModel): product_id: int; qty: float = Field(ge=0, le=10000)     # set a line to an exact quantity (0 = remove)
-class Adjust(BaseModel): sku: str; new_stock: float = Field(ge=0, le=10_000_000); note: str = Field("manual count", max_length=200)
+class Adjust(BaseModel):
+    sku: str; new_stock: float = Field(ge=0, le=10_000_000); note: str = Field("manual count", max_length=200)
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v): return hashing.no_card_number(v)
 class Checkout(BaseModel): payment_method: str; discount_code: Optional[str] = None
 class RefundLine(BaseModel): id: int; qty: float = Field(gt=0, le=10000)      # product id + quantity to take back
-class Refund(BaseModel): note: str = "refunded"; items: Optional[list[RefundLine]] = None; paid_via: Optional[str] = None   # how the money went back: Cash / Card / Wallet (default: the way the customer paid)   # items omitted = refund everything still refundable
+class Refund(BaseModel):
+    note: str = "refunded"; items: Optional[list[RefundLine]] = None; paid_via: Optional[str] = None   # how the money went back: Cash / Card / Wallet (default: the way the customer paid)   # items omitted = refund everything still refundable
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v): return hashing.no_card_number(v)
 
 @app.get("/inventory")
 def inventory(): return {"products": [public_product(p) for p in rows("SELECT * FROM products ORDER BY cat, name")], "low_threshold": low_threshold()}

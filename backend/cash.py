@@ -23,10 +23,11 @@ import subprocess
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import alerts
 import context
+import hashing
 import database
 import settings
 from database import audit, db, transaction
@@ -74,6 +75,11 @@ def require_shift_for_cash() -> None:
 class ReasonIn(BaseModel):
     reason: str = Field(max_length=200)
 
+    @field_validator("reason")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
+
 
 @router.post("/drawer/open")
 def manual_open(b: ReasonIn):
@@ -104,9 +110,19 @@ class CloseIn(BaseModel):
     counted_cash: float = Field(ge=0, le=100_000_000)
     note: str = Field("", max_length=200)
 
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
+
 
 class ReviewIn(BaseModel):
     note: str = Field("", max_length=200)
+
+    @field_validator("note")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
 
 
 def _expected(shift) -> float:
@@ -144,6 +160,11 @@ class MoveIn(BaseModel):
     kind: str
     amount: float = Field(gt=0, le=10_000_000)
     reason: str = Field(max_length=200)
+
+    @field_validator("reason")
+    @classmethod
+    def _no_card(cls, v):
+        return hashing.no_card_number(v) if isinstance(v, str) else v
 
 
 KINDS = {"drop": "Cash drop (taken out to the safe)", "payout": "Cash payout (paid out of the drawer)", "add": "Cash added to the drawer"}

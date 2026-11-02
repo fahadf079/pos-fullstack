@@ -150,7 +150,7 @@ print("owner password ok")
 
 # ───────────────────────── 2FA (authenticator app) ─────────────────────────
 r = ok(owner.post("/auth/2fa/begin", json={})); secret = r["secret"]; assert r["uri"].startswith("otpauth://totp/")
-raw = sql("SELECT totp_secret FROM users WHERE username='boss'")[0][0]; assert secret not in raw and raw.startswith("seal1$")     # stored sealed
+raw = sql("SELECT totp_secret FROM users WHERE username='boss'")[0][0]; assert secret not in raw and raw.startswith("seal2$")     # stored sealed
 assert owner.post("/auth/2fa/confirm", json={"code": "000000"}).status_code == 422
 step = totp.current_step(); good = totp._code(secret, step)
 rec = ok(owner.post("/auth/2fa/confirm", json={"code": good}))["recovery_codes"]; assert len(rec) == 8 and len(set(rec)) == 8
