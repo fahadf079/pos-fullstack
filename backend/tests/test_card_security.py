@@ -69,7 +69,14 @@ assert key.decode() not in wrapped and keyescrow.unwrap(salt, wrapped, code) == 
 assert keyescrow.unwrap(salt, wrapped, code.lower().replace("-", " ")) == key           # typing style does not matter
 try: keyescrow.unwrap(salt, wrapped, keyescrow.new_code()); raise SystemExit("wrong code accepted")
 except SystemExit as e: assert "wrong" in str(e)
+import io, contextlib
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf): keyescrow.run("status")
+assert "No copy in the database yet" in buf.getvalue()
 KNOWN = keyescrow.new_code(); keyescrow.new_code = lambda: KNOWN; keyescrow.run("create")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf): keyescrow.run("status")
+assert "A locked copy of the key is in the database (made 20" in buf.getvalue(), buf.getvalue()
 row = sql("SELECT salt, wrapped FROM key_escrow WHERE id=1")[0]
 assert key.decode() not in str(row)
 with tempfile.TemporaryDirectory() as d:

@@ -63,7 +63,7 @@ def run(cmd: str) -> None:
     with transaction():
         row = db.execute("SELECT salt, wrapped, created_ts FROM key_escrow WHERE id=1").fetchone()
         if cmd == "status":
-            print(f"A locked copy of the key is in the database (made {row['created_ts']:%Y-%m-%d %H:%M})." if row
+            print(f"A locked copy of the key is in the database (made {str(row['created_ts'])[:16].replace('T', ' ')})." if row
                   else "No copy in the database yet. Run:  python keyescrow.py create")
         elif cmd == "create":
             if row and input("A copy already exists. Replace it and issue a NEW recovery code? (yes/no): ").strip().lower() != "yes":
